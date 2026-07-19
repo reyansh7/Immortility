@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.pytest_tmp/
+.audit_tmp/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local Immortility runtime state (do not publish)
+state.json
+workflow.db
+immortility.log
+logs/
+.checkpoints/
+.immortility/
+.vector_db/
+vector_db/
+*.db
+!pytest.ini
+
+memory/data/
+audit_report.json
+
+# Graphify / generated
+graphify-out/
+
+# IDE / OS
+.idea/
+.vscode/
+.vs/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Node (if present)
+node_modules/
+package-lock.json
+.next/
+
+# Local agent / OneDrive noise
+.agents/
+projects/
