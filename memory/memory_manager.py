@@ -7,25 +7,15 @@ type and enforces secret-filtering rules.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from memory.conversation_memory import ConversationMemory
 from memory.preference_memory import PreferenceMemory
 from memory.project_memory import ProjectMemory
 from memory.session_memory import SessionMemory
+from rag.security_filters import chunk_contains_secret
 
 logger = logging.getLogger(__name__)
-
-# Patterns that must NEVER be stored
-SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?i)(password|passwd|pwd)\s*[:=]\s*\S+"),
-    re.compile(r"(?i)(api[_-]?key|secret[_-]?key|token)\s*[:=]\s*\S+"),
-    re.compile(r"(?i)(access[_-]?key|secret|credential)\s*[:=]\s*\S+"),
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-    re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
-    re.compile(r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"),
-)
 
 
 class MemoryManager:
@@ -55,7 +45,6 @@ class MemoryManager:
         Returns:
             True if stored successfully, False if rejected (e.g. secret).
         """
-        # Secret filtering
         text_repr = str(value)
         if self._contains_secret(text_repr):
             logger.warning(
@@ -85,15 +74,7 @@ class MemoryManager:
     # ── Recall ──────────────────────────────────────────────────────
 
     def recall(self, category: str, query: str = "") -> Any:
-        """Retrieve memory entries.
-
-        Args:
-            category: Memory type to search.
-            query: Optional search query.
-
-        Returns:
-            Retrieved data (type depends on category).
-        """
+        """Retrieve memory entries."""
         category = category.lower()
         if category == "conversation":
             if query:
@@ -118,15 +99,7 @@ class MemoryManager:
     # ── Forget ──────────────────────────────────────────────────────
 
     def forget(self, category: str, key: str) -> bool:
-        """Remove a specific memory entry.
-
-        Args:
-            category: Memory type.
-            key: Key to remove.
-
-        Returns:
-            True if something was removed.
-        """
+        """Remove a specific memory entry."""
         category = category.lower()
         if category == "project":
             return self.project.forget_project(key)
@@ -144,25 +117,18 @@ class MemoryManager:
     # ── Summary ─────────────────────────────────────────────────────
 
     def get_full_summary(self, project_name: str = "") -> str:
-        """Assemble a combined memory summary for context injection.
-
-        Args:
-            project_name: Optionally scope to a specific project.
-
-        Returns:
-            Formatted summary string.
-        """
+        """Build a combined summary of all memory for context injection."""
         parts: list[str] = []
-
-        proj = self.project.to_summary(project_name) if project_name else self.project.to_summary()
-        if proj:
-            parts.append(proj)
 
         prefs = self.preferences.to_summary()
         if prefs:
             parts.append(prefs)
 
-        conv = self.conversation.to_summary(n=5)
+        proj = self.project.to_summary()
+        if proj:
+            parts.append(proj)
+
+        conv = self.conversation.to_summary()
         if conv:
             parts.append(conv)
 
@@ -171,6 +137,84 @@ class MemoryManager:
             parts.append(sess)
 
         return "\n\n".join(parts)
+
+    # ── Conversation extraction (moved from MemoryAgent) ────────────
+
+    def extract_from_conversation(self, messages: list[dict[str, str]]) -> None:
+        """Analyse conversation messages and auto-extract memories."""
+        for msg in messages:
+            content = msg.get("content", "").lower()
+            role = msg.get("role", "")
+
+            if role != "assistant":
+                continue
+
+            if any(
+                phrase in content
+                for phrase in ("task complete", "done:", "successfully", "created file")
+            ):
+                self.conversation.add_task(msg["content"][:200])
+
+            if any(
+                phrase in content
+                for phrase in ("fixed", "bug fix", "resolved", "patched")
+            ):
+                self.conversation.add_bug_fix(msg["content"][:200])
+
+    async def auto_learn(self, user_input: str) -> None:
+        """Extract facts/preferences from user input after a reply."""
+        import asyncio
+
+        from core.json_utils import parse_llm_json
+        from core.llm import chat
+
+        prompt = f"""You are a background memory extraction agent. Analyze the user's message.
+Extract any explicit user preferences, personal facts (e.g. name, role, tech stack), or project details that the user shares.
+Output ONLY a JSON array of objects with keys: "category" ("preference", "project"), "key" (short name), "value" (the fact/preference).
+If there is no new personal fact, preference, or project detail to remember, you MUST output an empty array [].
+
+Examples:
+Input: "my name is reyansh" -> [{{"category": "preference", "key": "user_name", "value": "reyansh"}}]
+Input: "i prefer python for backend" -> [{{"category": "preference", "key": "backend_language", "value": "python"}}]
+Input: "what is the weather?" -> []
+Input: "fix this bug" -> []
+
+User message: {user_input}"""
+
+        try:
+            response = await asyncio.to_thread(
+                chat,
+                model="auto",
+                messages=[{"role": "user", "content": prompt}],
+                format="json",
+                think=False,
+                options={"temperature": 0.1},
+            )
+            content = response["message"]["content"].strip()
+            data = parse_llm_json(content)
+
+            if isinstance(data, dict):
+                data = data.get("items", data.get("results", []))
+
+            if isinstance(data, list):
+                for item in data:
+                    cat = item.get("category")
+                    k = item.get("key")
+                    v = item.get("value")
+                    if cat and k and v:
+                        self.store(cat, k, v)
+                        logger.info("Auto-learned: %s -> %s = %s", cat, k, v)
+                        if cat in ("preference", "project"):
+                            try:
+                                from knowledge.engine import KnowledgeEngine
+
+                                ke = KnowledgeEngine()
+                                proj = ke.get_active_project_name() or "global"
+                                ke._kg_db.set_fact(proj, str(k), str(v)[:500])
+                            except Exception:
+                                pass
+        except Exception as e:
+            logger.debug("Auto-learn failed: %s", e)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
@@ -183,7 +227,4 @@ class MemoryManager:
     @staticmethod
     def _contains_secret(text: str) -> bool:
         """Check whether *text* contains password / API key / secret patterns."""
-        for pattern in SECRET_PATTERNS:
-            if pattern.search(text):
-                return True
-        return False
+        return chunk_contains_secret(text)

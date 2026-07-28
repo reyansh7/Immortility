@@ -279,12 +279,26 @@ async def test_8_fastapi_crud_creates_new_files_only(tmp_path):
 @pytest.mark.asyncio
 async def test_workflow_fails_when_no_patches(sample_project):
     from editing.coding_workflow import CodingWorkflow
+    from editing.edit_planner import EditPlan
 
     workflow = CodingWorkflow(project_root=sample_project)
+    empty_plan = EditPlan(
+        goal="quantum flux capacitor",
+        files_to_read=[],
+        files_to_edit=[],
+        dependencies=[],
+        risks=[],
+        verification_strategy="syntax check",
+        symbols_to_modify=[],
+        plan_steps=["No-op"],
+    )
     with patch.object(
         workflow.patch_generator, "generate_patches", new_callable=AsyncMock
-    ) as mock_gen:
+    ) as mock_gen, patch.object(
+        workflow.edit_planner, "generate_plan", new_callable=AsyncMock
+    ) as mock_plan:
         mock_gen.return_value = []
+        mock_plan.return_value = empty_plan
         result = await workflow.run("Implement quantum flux capacitor module")
         assert not result.success
         assert result.files_modified == []

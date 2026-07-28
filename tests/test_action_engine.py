@@ -75,7 +75,9 @@ async def test_action_engine_stops_after_repeated_failures(tmp_path):
 
     with patch("core.action_engine.chat") as mock_chat:
         mock_chat.side_effect = responses
-        msg = await execute_action("fix page", require_edits=True)
+        # auto_confirm bypasses the mutator confirmation gate so the loop can
+        # actually reach the repeated-failure guard under test.
+        msg = await execute_action("fix page", require_edits=True, auto_confirm=True)
 
     assert mock_chat.call_count <= 5
     lower = msg.lower()

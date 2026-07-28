@@ -1,7 +1,7 @@
 import logging
-import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from editing.patch_validator import PatchValidator
 
@@ -68,18 +68,12 @@ class Verifier:
     @staticmethod
     def verify_nextjs_build(project_root: str | Path) -> tuple[bool, str]:
         """Run npm run build for Next.js projects. Returns (ok, message)."""
+        from core.repo_detector import is_nextjs_project, load_package_json
+
         root = Path(project_root).resolve()
-        pkg = root / "package.json"
-        if not pkg.exists():
+        if load_package_json(root) is None:
             return True, "skip: no package.json"
-
-        try:
-            data = json.loads(pkg.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return True, "skip: invalid package.json"
-
-        deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
-        if "next" not in deps:
+        if not is_nextjs_project(root):
             return True, "skip: not a Next.js project"
 
         try:
@@ -141,3 +135,72 @@ class Verifier:
         if result.returncode != 0:
             return False, f"{label} failed ({profile.kind}):\n{output[-3000:]}"
         return True, f"{label} passed ({profile.kind})"
+
+
+class ProjectVerifier:
+    """Single project-level entrypoint: file checks → CIGate → optional Next build.
+
+    Used by workflows and the action-engine DONE gate.
+    """
+
+    def __init__(self, project_root: str | Path) -> None:
+        self.project_root = Path(project_root).resolve()
+
+    async def verify_all(self, files: list[str] | None = None) -> dict[str, Any]:
+        targets = files or []
+        if not targets:
+            return {"success": True, "details": "No files to verify", "results": {}}
+
+        results: dict[str, str] = {}
+        failures: list[str] = []
+        for fpath in targets:
+            path = Path(fpath)
+            if not path.is_absolute():
+                path = self.project_root / path
+            status = Verifier.verify_file(str(path), self.project_root)
+            results[str(path)] = status
+            if status != "PASS":
+                failures.append(f"{path.name}: {status}")
+
+        success = len(failures) == 0
+        details = "All files passed" if success else "; ".join(failures)
+        return {"success": success, "details": details, "results": results}
+
+    async def verify_project(self, files: list[str] | None = None) -> dict[str, Any]:
+        """Full CI completion gate: lint → typecheck → tests (plus optional build)."""
+        from editing.ci_gate import CIGate
+
+        file_result = await self.verify_all(files)
+        if not file_result["success"]:
+            file_result["stage"] = "file"
+            return file_result
+
+        ci = CIGate(self.project_root)
+        ci_result = ci.run_full_pipeline(files or [])
+        if not ci_result.get("success"):
+            return {
+                "success": False,
+                "details": ci_result.get("details", "CI failed"),
+                "stage": ci_result.get("stage", "ci"),
+                "stages": ci_result.get("stages", []),
+                "results": file_result.get("results", {}),
+            }
+
+        ok, build_msg = Verifier.verify_nextjs_build(self.project_root)
+        if not ok:
+            return {
+                "success": False,
+                "details": build_msg,
+                "stage": "build",
+                "build_output": build_msg,
+                "results": file_result.get("results", {}),
+            }
+
+        return {
+            "success": True,
+            "details": "files + CI pipeline + build passed",
+            "results": file_result.get("results", {}),
+            "ci": ci_result,
+            "build": build_msg,
+        }
+

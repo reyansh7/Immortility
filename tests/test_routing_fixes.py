@@ -20,9 +20,12 @@ def test_is_implementation_confirm():
     assert not is_implementation_confirm("what is jwt")
 
 
-def test_is_approval_prefix():
-    assert is_approval("yes implement it")
+def test_is_approval_exact_only():
+    # Exact match only — long phrases must not approve a pending delete/write
+    assert not is_approval("yes implement it")
     assert is_approval("yes")
+    assert is_approval("confirm")
+    assert not is_approval("yes fix that file")
 
 
 def test_sanitize_surrogates():

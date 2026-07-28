@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
-from ollama import chat
+from core.llm import chat, active_backend, _ollama_model, _provider
 
 from core.agent_state import AgentState
 from core.paths import normalize_path_key, sanitize_llm_path
@@ -89,15 +89,9 @@ def _tool_call_failed(result: str) -> bool:
 
 
 def _parse_tool_json(content: str) -> dict:
-    import re
-    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-    if "```json" in content:
-        json_str = content.split("```json")[-1].split("```")[0].strip()
-    elif "```" in content:
-        json_str = content.split("```")[-1].split("```")[0].strip()
-    else:
-        json_str = content.strip()
-    return json.loads(json_str)
+    from core.json_utils import parse_llm_json
+
+    return parse_llm_json(content)
 
 
 def _normalize_tool_path(path: str, project_root: str, desktop: str) -> str:
@@ -129,7 +123,7 @@ async def agent_step(
         {"role": "user", "content": prompt},
     ]
     response = await asyncio.to_thread(
-        chat, model="qwen3:8b", messages=messages, think=False
+        chat, model="auto", messages=messages, think=False
     )
     content = response["message"]["content"]
     if persist_history:
@@ -155,28 +149,22 @@ async def _run_verification_gate(
     full_ci: bool = True,
 ) -> tuple[bool, str]:
     """Mechanical (+ optional full CI) + semantic checks before allowing DONE."""
-    from editing.ci_gate import CIGate
-    from editing.verifier import Verifier
+    from editing.verifier import ProjectVerifier
 
-    failures: list[str] = []
     roots = Path(project_root).resolve() if project_root else Path.cwd()
     touched = list(before_snapshots.keys())
+    gate = ProjectVerifier(roots)
 
-    # Iterative speed path already happened during edits; completion requires full CI
     if full_ci and project_root:
-        ci = CIGate(roots)
-        ci_result = ci.run_full_pipeline(touched)
+        ci_result = await gate.verify_project(touched)
         if not ci_result.get("success"):
             return False, (
                 f"CI({ci_result.get('stage')}): {ci_result.get('details', '')[:2500]}"
             )
     else:
-        for path in before_snapshots:
-            status = Verifier.verify_file(path, roots)
-            if status != "PASS":
-                failures.append(f"Mechanical(file): {path}: {status}")
-        if failures:
-            return False, "\n".join(failures)
+        file_result = await gate.verify_all(touched)
+        if not file_result.get("success"):
+            return False, f"Mechanical(file): {file_result.get('details', '')}"
 
     diff_parts: list[str] = []
     for path, before in before_snapshots.items():
@@ -207,7 +195,7 @@ async def _run_verification_gate(
     )
     review = await asyncio.to_thread(
         chat,
-        model="qwen3:8b",
+        model="auto",
         messages=[{"role": "user", "content": reviewer_prompt}],
         think=False,
     )
@@ -249,8 +237,12 @@ async def execute_action(
     internal_history: list | None = None,
     tools_executed_init: list | None = None,
     context_override: str = "",
+    auto_confirm: bool = False,
 ) -> str:
-    """Action Engine: LLM tool loop with path normalization and DONE enforcement."""
+    """Action Engine: LLM tool loop with path normalization and DONE enforcement.
+
+    auto_confirm=True skips yes/no prompts (CLI convenience only — HUD must stay False).
+    """
     state = AgentState()
     registry = ToolRegistry()
     registry.setup()
@@ -286,7 +278,7 @@ async def execute_action(
     tool_prompt = f"""
 {registry.get_tool_prompt()}
 
-You are the Action Engine for Immortility. Execute real filesystem changes.
+You are the Action Engine for Immortility. {"Execute real filesystem changes." if require_edits else "Investigate and answer — do NOT invent edits unless the user asked to fix/change code."}
 
 RULES:
 1. Read before edit — call read_file before any edit tool on the same file.
@@ -294,10 +286,12 @@ RULES:
 3. ALL paths must be absolute. Project root: {project_root or desktop}
 4. read_file returns raw text in "content" and line numbers in "numbered" — use "content" for target_text, "numbered" for replace_lines.
 5. For .tsx/.jsx files: prefer write_file with the FULL corrected file if edit_file fails twice.
-6. NEVER call DONE until all required edits are applied AND verified with read_file.
+6. {"NEVER call DONE until all required edits are applied AND verified with read_file." if require_edits else "For analysis / bug-hunt / review / explain requests: gather enough evidence with read_file/list_directory (or tree), then call DONE with a clear Markdown report in args.message. Do NOT edit files. Do NOT keep reading forever — max ~8 reads then DONE."}
 7. Respond with ONE JSON object per turn: tool, reason, confidence, args.
 8. NEVER use search_google or open_url for local file paths.
-9. If read_file returns "No such file or directory", the file does not exist. You MUST use create_file to create it.
+8b. Immortility's OWN codebase is at the Immortility project root (sibling of core/, rag/, knowledge/). When the user asks about YOUR vector database, RAG, knowledge folder, or where RAG code lives: use list_directory/read_file on those local folders (rag/, knowledge/, .vector_db/). Do NOT web-search "vector database". There is no rag_code.py — RAG is the rag/ package (vector_store.py, retriever.py, indexer.py, etc.).
+8c. Destructive tools need user confirmation in HUD — do not assume auto-approve.
+9. If read_file returns "No such file or directory", the file does not exist. You MUST use create_file to create it (only if the user asked to create/fix something).
 10. To list installed software or games on Windows, use run_command with this EXACT command (do not modify dollar signs):
 powershell -NoProfile -Command "[Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8; Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' | Where-Object {{ $_.DisplayName }} | Select-Object -ExpandProperty DisplayName | Sort-Object -Unique"
 Filter game names from the list in your DONE message. Do NOT repeat the command if it already succeeded.
@@ -307,6 +301,8 @@ Filter game names from the list in your DONE message. Do NOT repeat the command 
 14. If verification repeatedly fails, you may return {{"tool":"DONE","reason":"fallback","confidence":1.0,"request_fallback":true,"args":{{"message":"need stronger model"}}}} only after at least two failed verification attempts.
 15. Use this read-only retrieved context before tool calls:
 {context_override[:5000] if context_override else "No extra retrieved context provided."}
+16. To open a project folder in VS Code, use run_command: code "C:\\full\\path\\to\\folder" — never shell-execute a directory path alone.
+17. globals.css in Next.js App Router is usually under src/app/globals.css (not src/globals.css).
 
 Example read:
 {{"tool": "read_file", "reason": "read before edit", "confidence": 1.0, "args": {{"path": "{example_path}"}}}}
@@ -317,12 +313,12 @@ Example insert:
 Example write full file (use when small file or edit_file keeps failing):
 {{"tool": "write_file", "reason": "rewrite file", "confidence": 0.9, "args": {{"path": "{example_path}", "content": "full file text"}}}}
 
-Example done (only after edits verified):
-{{"tool": "DONE", "reason": "verified changes", "confidence": 1.0, "args": {{"message": "summary of what changed"}}}}
+Example done:
+{{"tool": "DONE", "reason": "{"verified changes" if require_edits else "analysis complete"}", "confidence": 1.0, "args": {{"message": "{"summary of what changed" if require_edits else "Markdown findings / bug report"}"}}}}
 """
 
     console.print("\n[bold magenta]--- Action Engine ---[/bold magenta]")
-    max_steps = 20
+    max_steps = 10 if not require_edits else 20
     files_read: set[str] = set()
     read_counts: dict[str, int] = {}
     tools_executed: set[str] = set(tools_executed_init or [])
@@ -330,9 +326,17 @@ Example done (only after edits verified):
     file_edit_failures: dict[str, int] = {}
     last_error = ""
     verification_failures = 0
-    primary_model = "qwen3:8b"
+    done_reject_count = 0
+    successful_lookups = 0
+    evidence_notes: list[str] = []
+    primary_model = "auto"
     current_model = primary_model
-    fallback_model = _detect_fallback_model(primary_model)
+    using_ollama_fallback = False
+    # Keep Ollama as fallback when Gemini is primary
+    if _provider() == "gemini":
+        fallback_model = _ollama_model()
+    else:
+        fallback_model = _detect_fallback_model("qwen3:8b")
     before_snapshots: dict[str, str] = {}
     identical_failures: dict[str, int] = {}
 
@@ -341,14 +345,69 @@ Example done (only after edits verified):
         if not internal_history or internal_history[-1].get("content") != user_input:
             internal_history.append({"role": "user", "content": user_input})
 
+    console.print(f"[dim]LLM backend: {active_backend()}[/dim]")
+
+    async def _force_analysis_summary(reason: str) -> str:
+        """Local models often never call DONE — synthesize a report from evidence."""
+        bundle = "\n\n".join(evidence_notes[-12:])[:7000]
+        if not bundle.strip():
+            return (
+                "I inspected the folder but couldn't finish a structured report. "
+                "Try asking about one specific file (e.g. `rag/indexer.py`)."
+            )
+        prompt = (
+            "You analyzed a codebase via tools. Write a clear Markdown report for Reyansh.\n"
+            f"Original request: {user_input or '(analysis)'}\n"
+            f"Stop reason: {reason}\n\n"
+            "Tool evidence:\n"
+            f"{bundle}\n\n"
+            "Include: what the folder/module is for, key files, how pieces connect, "
+            "and any obvious issues. Be concrete. No tool JSON."
+        )
+        try:
+            response = await asyncio.to_thread(
+                chat,
+                model="auto",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are Immortility. Summarize code investigation results briefly and clearly.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                think=False,
+                max_output_tokens=700,
+                temperature=0.3,
+            )
+            summary = (response.get("message") or {}).get("content") or ""
+            summary = str(summary).strip()
+        except Exception as exc:
+            summary = (
+                f"Gathered notes from {successful_lookups} lookups "
+                f"({len(files_read)} files read) but summary failed: {exc}"
+            )
+        if not summary:
+            summary = (
+                f"Looked at {len(files_read)} files / {successful_lookups} tool results "
+                "but produced an empty summary. Ask about a specific file next."
+            )
+        console.print(Panel(Markdown(summary), title="✅ Action Completed", border_style="green"))
+        state.append_message("assistant", f"Action completed: {summary}")
+        return summary
+
+
     for step in range(max_steps):
         messages = [{"role": "system", "content": tool_prompt}] + internal_history
         try:
             response = await asyncio.to_thread(
-                chat, model=current_model, messages=messages, think=False
+                chat,
+                model=current_model if using_ollama_fallback else "auto",
+                messages=messages,
+                think=False,
+                force_provider="ollama" if using_ollama_fallback else None,
             )
         except Exception as exc:
-            msg = f"Ollama error: {exc}. Is Ollama running with qwen3:8b?"
+            msg = f"LLM error: {exc}. Backend={active_backend()}"
             console.print(f"[red]{msg}[/red]")
             return msg
 
@@ -366,14 +425,34 @@ Example done (only after edits verified):
 
             if tool_name.upper() == "DONE":
                 if require_edits and not tools_executed.intersection(MUTATING_TOOLS):
+                    done_reject_count += 1
+                    # Don't loop forever — after 2 rejects, accept analysis-style DONE
+                    if done_reject_count >= 2:
+                        final_msg = args.get("message") or (
+                            "Stopped: no edits were required/made. "
+                            "Ask me to fix a specific issue if you want changes."
+                        )
+                        console.print(
+                            Panel(Markdown(str(final_msg)), title="✅ Action Completed", border_style="green")
+                        )
+                        state.append_message("assistant", f"Action completed: {final_msg}")
+                        return str(final_msg)
                     err = (
                         "DONE rejected: no file changes were made. "
-                        "Use read_file, then edit_file/create_file/insert_after."
+                        "Use read_file, then edit_file/create_file/insert_after. "
+                        "If the user only asked for analysis, call DONE with your findings."
                     )
                     console.print(f"[red]{err}[/red]")
                     internal_history.append({"role": "user", "content": err})
                     continue
-                if wants_fallback and verification_failures >= 2 and fallback_model and current_model != fallback_model:
+                if wants_fallback and verification_failures >= 2 and fallback_model and not using_ollama_fallback:
+                    using_ollama_fallback = True
+                    current_model = fallback_model
+                    msg = f"Switching to Ollama fallback model: {fallback_model}"
+                    _log_event("fallback_trigger", user_input or "", failure_reason=msg)
+                    internal_history.append({"role": "user", "content": msg})
+                    continue
+                if wants_fallback and verification_failures >= 2 and fallback_model and current_model != fallback_model and using_ollama_fallback:
                     current_model = fallback_model
                     msg = f"Switching to fallback model: {fallback_model}"
                     _log_event("fallback_trigger", user_input or "", failure_reason=msg)
@@ -418,11 +497,18 @@ Example done (only after edits verified):
             if tool_name == "read_file" and args.get("path"):
                 path = args["path"]
                 read_counts[path] = read_counts.get(path, 0) + 1
-                if read_counts[path] > 2:
-                    err = (
-                        f"You already read '{path}' {read_counts[path]} times. "
-                        "Use write_file or edit_file to apply changes, or read a different file."
-                    )
+                max_reads = 2 if require_edits else 1
+                if read_counts[path] > max_reads:
+                    if require_edits:
+                        err = (
+                            f"You already read '{path}' {read_counts[path]} times. "
+                            "Use write_file or edit_file to apply changes, or read a different file."
+                        )
+                    else:
+                        err = (
+                            f"You already read '{path}'. "
+                            "Read a different file, or call DONE with your Markdown findings now."
+                        )
                     console.print(f"[yellow]{err}[/yellow]")
                     internal_history.append({"role": "user", "content": err})
                     continue
@@ -436,13 +522,14 @@ Example done (only after edits verified):
                     internal_history.append({"role": "user", "content": err})
                     continue
 
-            if needs_confirmation(tool_name, args):
+            if needs_confirmation(tool_name, args) and not auto_confirm:
                 state.pending_action = {
                     "tool": tool_name,
                     "args": args,
                     "internal_history": internal_history[-6:],
                     "require_edits": require_edits,
-                    "tools_executed": list(tools_executed)
+                    "tools_executed": list(tools_executed),
+                    "context_override": context_override[:5000] if context_override else "",
                 }
                 state.save()
                 console.print(f"\n[bold yellow]{format_confirmation_message(tool_name, args)}[/bold yellow]")
@@ -503,12 +590,35 @@ Example done (only after edits verified):
             preview = result if isinstance(result, str) and len(result) < 2000 else str(result)[:2000]
             console.print(f"[green]Result:[/green] {preview[:400]}...")
             result_prefix = "Tool ERROR result" if failed else "Tool result"
-            internal_history.append({"role": "user", "content": f"{result_prefix}: {preview}\n\nNext step? (JSON)"})
+            if not failed and tool_name in {"read_file", "list_directory", "run_command"}:
+                successful_lookups += 1
+                evidence_notes.append(f"### {tool_name}\n{preview[:1200]}")
+            nudge = ""
+            if (
+                not require_edits
+                and not failed
+                and successful_lookups >= 5
+            ):
+                nudge = (
+                    "\n\nCRITICAL: You already have enough evidence "
+                    f"({successful_lookups} lookups, {len(files_read)} files). "
+                    "Your NEXT response MUST be tool DONE with a Markdown report in args.message. "
+                    "Do NOT read or list anything else."
+                )
+            internal_history.append(
+                {"role": "user", "content": f"{result_prefix}: {preview}\n\nNext step? (JSON){nudge}"}
+            )
+
+            # Analysis mode: stop reading forever — force a written summary
+            if not require_edits and successful_lookups >= 8:
+                return await _force_analysis_summary("enough evidence gathered")
 
             if no_progress >= 3:
                 console.print("[yellow]Repeated failures — stopping action loop.[/yellow]")
                 if last_error:
                     console.print(f"[yellow]Last error: {last_error[:200]}[/yellow]")
+                if not require_edits and evidence_notes:
+                    return await _force_analysis_summary("repeated tool failures")
                 break
 
         except json.JSONDecodeError:
@@ -516,7 +626,12 @@ Example done (only after edits verified):
         except Exception as exc:
             internal_history.append({"role": "user", "content": f"Error: {exc}"})
 
-    return "Action loop ended without completion. Try rephrasing or use a more specific file path."
+    if not require_edits and evidence_notes:
+        return await _force_analysis_summary("step limit reached without DONE")
+    return (
+        "Action loop ended without completion. "
+        "Try asking about one specific file path (e.g. `rag/indexer.py`)."
+    )
 
 
 async def handle_summarize_webpage() -> str:
@@ -532,7 +647,7 @@ async def handle_summarize_webpage() -> str:
 
     response = await asyncio.to_thread(
         chat,
-        model="qwen3:8b",
+        model="auto",
         messages=[{"role": "user", "content": f"Summarize this webpage ({url}):\n\n{text}"}],
         think=False,
     )

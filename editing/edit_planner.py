@@ -62,15 +62,9 @@ Respond ONLY with a JSON object matching this schema (you may use <think> tags b
         response_text = await agent_step("Edit Planner", prompt, context=project_context)
         
         try:
-            content = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
-            if "```json" in content:
-                json_str = content.split("```json")[-1].split("```")[0].strip()
-            elif "```" in content:
-                json_str = content.split("```")[-1].split("```")[0].strip()
-            else:
-                json_str = content.strip()
-            
-            data = json.loads(json_str)
+            from core.json_utils import parse_llm_json
+
+            data = parse_llm_json(response_text)
             plan_steps = data.get("plan_steps") or data.get("steps", [])
             if plan_steps and isinstance(plan_steps[0], dict):
                 formatted_steps = []

@@ -1,10 +1,12 @@
 import json
-import os
+import threading
+from pathlib import Path
 
 from core.research_context import ResearchContext
+from core.repo_paths import state_file_path
 
-STATE_FILE = "state.json"
 MAX_HISTORY = 30
+_SAVE_LOCK = threading.RLock()
 
 
 class AgentState:
@@ -24,6 +26,10 @@ class AgentState:
         self._initialized = True
         self._load()
 
+    @property
+    def state_path(self) -> Path:
+        return state_file_path()
+
     def _load(self):
         self.mode = "CHAT"
         self.pending_action = None
@@ -34,10 +40,20 @@ class AgentState:
         self.browser_state = None
         self.pending_coding_request: dict | str | None = None
 
-        if os.path.exists(STATE_FILE):
+        path = self.state_path
+        # Migrate legacy cwd-relative state.json once
+        legacy = Path("state.json")
+        if not path.is_file() and legacy.is_file() and legacy.resolve() != path.resolve():
             try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                path.write_bytes(legacy.read_bytes())
+            except OSError:
+                pass
+
+        if path.is_file():
+            try:
+                with _SAVE_LOCK:
+                    with path.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
                 self.mode = data.get("mode", "CHAT")
                 self.pending_action = data.get("pending_action")
                 self.current_task = data.get("current_task")
@@ -82,9 +98,10 @@ class AgentState:
         self.save()
 
     def append_message(self, role: str, content: str) -> None:
-        self.conversation_history.append({"role": role, "content": content})
-        if len(self.conversation_history) > MAX_HISTORY:
-            self.conversation_history = self.conversation_history[-MAX_HISTORY:]
+        with _SAVE_LOCK:
+            self.conversation_history.append({"role": role, "content": content})
+            if len(self.conversation_history) > MAX_HISTORY:
+                self.conversation_history = self.conversation_history[-MAX_HISTORY:]
         self.save()
 
     def save(self) -> None:
@@ -98,8 +115,12 @@ class AgentState:
             "browser_state": self.browser_state,
             "pending_coding_request": self.pending_coding_request,
         }
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        path = self.state_path
+        tmp = path.with_suffix(".tmp")
+        with _SAVE_LOCK:
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            tmp.replace(path)
 
     @classmethod
     def reset_instance(cls) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 RepoKind = Literal["python", "node", "rust", "go", "unknown"]
 
@@ -16,6 +16,39 @@ class RepoProfile:
     root: Path
     test_command: list[str]
     reason: str
+
+
+def load_package_json(project_root: str | Path) -> dict[str, Any] | None:
+    """Load package.json or return None if missing/invalid."""
+    pkg = Path(project_root).resolve() / "package.json"
+    if not pkg.is_file():
+        return None
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def package_dependencies(project_root: str | Path) -> dict[str, Any]:
+    """Merged dependencies + devDependencies from package.json."""
+    data = load_package_json(project_root)
+    if not data:
+        return {}
+    deps = dict(data.get("dependencies") or {})
+    deps.update(data.get("devDependencies") or {})
+    return deps
+
+
+def has_dependency(project_root: str | Path, name: str) -> bool:
+    return name in package_dependencies(project_root)
+
+
+def is_nextjs_project(project_root: str | Path) -> bool:
+    root = Path(project_root).resolve()
+    if has_dependency(root, "next"):
+        return True
+    return (root / "next.config.ts").exists() or (root / "next.config.js").exists()
 
 
 class RepositoryDetector:
@@ -44,15 +77,10 @@ class RepositoryDetector:
             )
 
         # Node / JS / TS (prefer package.json test script)
-        pkg = root / "package.json"
-        if pkg.exists():
-            has_test_script = False
-            try:
-                data = json.loads(pkg.read_text(encoding="utf-8"))
-                scripts = data.get("scripts") or {}
-                has_test_script = "test" in scripts
-            except (json.JSONDecodeError, OSError):
-                has_test_script = False
+        data = load_package_json(root)
+        if data is not None:
+            scripts = data.get("scripts") or {}
+            has_test_script = "test" in scripts
             if has_test_script:
                 return RepoProfile(
                     kind="node",
@@ -60,7 +88,6 @@ class RepositoryDetector:
                     test_command=["npm", "test", "--", "--watchAll=false"],
                     reason="package.json scripts.test",
                 )
-            # Next/React without test script — skip rather than inventing
             return RepoProfile(
                 kind="node",
                 root=root,
@@ -76,7 +103,6 @@ class RepositoryDetector:
             test_dir = "tests" if (root / "tests").is_dir() else (
                 "test" if (root / "test").is_dir() else "."
             )
-            # Prefer pytest when configured or tests/ present
             if has_pytest_ini or has_tests or _pyproject_has_pytest(root / "pyproject.toml"):
                 return RepoProfile(
                     kind="python",

@@ -22,7 +22,14 @@ class FileIndexEntry:
 class IndexStateDB:
     """Persistent filepath → hash/timestamp mapping in SQLite."""
 
-    def __init__(self, db_path: str | Path = ".vector_db/index_state.db") -> None:
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        if db_path is None:
+            try:
+                from core.repo_paths import index_state_db_path
+
+                db_path = index_state_db_path()
+            except Exception:
+                db_path = ".vector_db/index_state.db"
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

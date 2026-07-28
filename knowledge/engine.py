@@ -23,8 +23,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agents.memory_agent import MemoryAgent
-from knowledge.context_builder import ContextBuilder
 from knowledge.context_ranker import ContextRanker
 from knowledge.graph_engine import GraphEngine
 from knowledge.hierarchical_memory import HierarchicalMemory
@@ -88,8 +86,6 @@ class KnowledgeEngine:
             hybrid_search=self._hybrid_search,
         )
         self._memory = MemoryManager()
-        self._memory_agent = MemoryAgent(self._memory)
-        self._context_builder = ContextBuilder()
         self._context_ranker = ContextRanker()
         self._retrieval_cache = RetrievalCache()
         self._graph_engine = GraphEngine()
@@ -227,8 +223,13 @@ class KnowledgeEngine:
         verification_passed: bool | None = None,
         failure_reason: str = "",
     ) -> None:
-        path = Path("logs") / "immortility_events.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from core.repo_paths import logs_dir
+
+            path = logs_dir() / "immortility_events.jsonl"
+        except Exception:
+            path = Path("logs") / "immortility_events.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mode": mode,
@@ -421,15 +422,15 @@ class KnowledgeEngine:
 
     def remember(self, category: str, key: str, value: Any) -> bool:
         """Store a memory entry."""
-        return self._memory_agent.store(category, key, value)
+        return self._memory.store(category, key, value)
 
     def recall(self, category: str, query: str = "") -> Any:
         """Retrieve memory entries."""
-        return self._memory_agent.retrieve(category, query)
+        return self._memory.recall(category, query)
 
     def forget(self, category: str, key: str) -> bool:
         """Remove a memory entry."""
-        return self._memory_agent.forget(category, key)
+        return self._memory.forget(category, key)
 
     def remember_current_project(self) -> bool:
         """Store the active project in long-term project memory."""
@@ -467,10 +468,10 @@ class KnowledgeEngine:
             f"Head:\n{preview}"
         )
         key = f"file:{file_path.name}"
-        self._memory_agent.store("conversation", key, digest[:4000])
+        self._memory.store("conversation", key, digest[:4000])
         # Also keep a short project-scoped pointer
         active = self.get_active_project_name() or "global"
-        self._memory_agent.store(
+        self._memory.store(
             "project",
             f"{active}:{file_path.name}",
             {
@@ -540,7 +541,7 @@ class KnowledgeEngine:
 
     def extract_memories(self, messages: list[dict[str, str]]) -> None:
         """Auto-extract memories from conversation history."""
-        self._memory_agent.extract_from_conversation(messages)
+        self._memory.extract_from_conversation(messages)
 
     # ── Bulk ingestion ──────────────────────────────────────────────
 

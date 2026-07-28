@@ -1,7 +1,7 @@
 import asyncio
 import re
 
-from ollama import chat
+from core.llm import chat
 
 VALID_CATEGORIES = ("RESEARCH_TASK", "ACTION", "TASK", "CHAT", "PROJECT")
 
@@ -54,7 +54,7 @@ Category:"""
     try:
         response = await asyncio.to_thread(
             chat,
-            model="qwen3:8b",
+            model="auto",
             messages=[{"role": "user", "content": prompt}],
             think=False,
         )

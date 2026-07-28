@@ -91,6 +91,130 @@ async def get_daily_challenge() -> dict:
     }
 
 
+def parse_pasted_leetcode(text: str) -> dict | None:
+    """Parse a pasted LeetCode problem statement into a problem dict.
+
+    Handles pastes like:
+      3664. Two-Letter Card Game
+      Medium
+      You are given a deck of cards...
+    """
+    raw = (text or "").strip()
+    if not raw or len(raw) < 40:
+        return None
+    low = raw.lower()
+    looks_like = (
+        bool(re.search(r"^\s*\d{1,5}\.\s+\S+", raw, re.M))
+        or "leetcode" in low
+        or ("example 1" in low and "input:" in low)
+        or ("constraints:" in low and "class solution" in low)
+        or ("return the maximum" in low and "example" in low)
+    )
+    if not looks_like:
+        return None
+
+    m = re.search(
+        r"(?:leetcode\s*)?#?\s*(\d{1,5})\.\s*([^\n]+)",
+        raw,
+        re.IGNORECASE,
+    )
+    if not m:
+        m = re.search(r"^(\d{1,5})\.\s*([^\n]+)", raw, re.M)
+    if not m:
+        return None
+
+    pid = m.group(1).strip()
+    title = m.group(2).strip()
+    title = re.sub(
+        r"\s*(Medium|Hard|Easy|Topics|Companies|Hint).*$",
+        "",
+        title,
+        flags=re.I,
+    ).strip()
+
+    diff = "Medium"
+    dm = re.search(r"\b(Easy|Medium|Hard)\b", raw)
+    if dm:
+        diff = dm.group(1)
+
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return {
+        "title": title,
+        "id": pid,
+        "difficulty": diff,
+        "url": f"https://leetcode.com/problems/{slug}/",
+        "description": raw,
+        "examples": "",
+        "tags": [],
+        "hints": [],
+        "snippet": (
+            "class Solution:\n"
+            "    def score(self, cards: List[str], x: str) -> int:\n"
+            if "two-letter card game" in low or "compatible cards" in low
+            else "class Solution:\n    def solve(self):\n        pass\n"
+        ),
+        "from_paste": True,
+    }
+
+
+def wants_leetcode(text: str) -> bool:
+    """True if the user is asking Immortility to solve / write a LeetCode problem.
+
+    Pure browse intents like "open youtube and leetcode" must return False.
+    """
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+
+    # Opening / browsing the site is NOT the coding skill
+    browse = bool(
+        re.search(
+            r"\b(open|launch|go to|navigate|browse|pull up|visit|show me|take me to)\b",
+            low,
+        )
+    )
+    solveish = bool(
+        re.search(
+            r"\b(solve|write|code|solution|implement|attempt|do\s+problem|"
+            r"python|save\s+to\s+desktop|create\s+(a\s+)?file)\b",
+            low,
+        )
+    )
+    if "leetcode" in low and browse and not solveish:
+        return False
+    if browse and re.search(r"\bleetcode\b", low) and re.search(
+        r"\b(youtube|netflix|github|google|browser|chrome|wikipedia)\b", low
+    ):
+        return False
+    # Bare "open leetcode" / "go to leetcode" with no solve intent
+    if "leetcode" in low and browse:
+        return False
+
+    if parse_pasted_leetcode(text):
+        return True
+    if "leetcode" in low and (solveish or re.search(r"\b\d{3,5}\b", low)):
+        return True
+    if re.search(r"\b\d{3,5}\.\s+\w+", text or "") and any(
+        w in low for w in ("solve", "write", "code", "python", "solution", "medium", "hard", "easy")
+    ):
+        return True
+    # Follow-up after a paste: "write it in python", "save to desktop"
+    if any(
+        p in low
+        for p in (
+            "write it in python",
+            "write the code",
+            "write in python",
+            "save to desktop",
+            "create a new file in desktop",
+            "create file on desktop",
+            "solution on desktop",
+        )
+    ):
+        return True
+    return False
+
+
 def format_problem_for_llm(problem: dict) -> str:
     """Format a LeetCode problem dict into a clean prompt for Qwen."""
     lines = [

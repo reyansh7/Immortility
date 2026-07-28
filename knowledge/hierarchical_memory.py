@@ -120,15 +120,13 @@ class HierarchicalMemory:
         return summary
 
     def _seed_project_facts(self, project: str, root: Path) -> None:
-        if (root / "package.json").exists():
+        from core.repo_detector import has_dependency, load_package_json
+
+        if load_package_json(root) is not None:
             self.db.set_fact(project, "package_manager", "npm")
-            try:
-                text = (root / "package.json").read_text(encoding="utf-8", errors="ignore").lower()
-            except OSError:
-                text = ""
-            if "next" in text:
+            if has_dependency(root, "next"):
                 self.db.set_fact(project, "framework", "Next.js")
-            if "react" in text:
+            if has_dependency(root, "react"):
                 self.db.set_fact(project, "ui", "React")
         if (root / "requirements.txt").exists() or (root / "pyproject.toml").exists():
             self.db.set_fact(project, "language", "Python")

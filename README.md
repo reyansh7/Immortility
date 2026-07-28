@@ -41,8 +41,36 @@ Useful commands inside the session:
 | `/projects` | Remembered projects |
 | `/import-docs <name> <path>` | Import documentation into a separate collection |
 | `/clear` | Clear conversation / pending state |
-| `/auto` | Toggle full autonomous workflow |
+| `/hud` | Re-open the red Immortility JARVIS-style HUD in your browser |
+| `/talk` or `/voice` | Continuous speech-to-speech with **local qwen3:8b only** (Whisper → Ollama → male Windows TTS). Say “stop” to leave. |
+| `/listen` | One-shot mic input into the normal text loop |
 | `/exit` | Quit |
+
+### Offline voice (your model only)
+
+No Hugging Face speech-to-speech / no OpenAI key. Flow:
+
+`mic → Whisper (local) → Ollama qwen3:8b → Windows male TTS`
+
+Everything ships in `requirements.txt`. Start it with `/talk` in the CLI, or tap
+the mic in the HUD for a continuous conversation.
+
+Accuracy is not left to chance — Whisper is biased toward Immortility's own
+vocabulary before decoding, and repaired afterwards:
+
+- **`hotwords` + priming prompt** seed the decoder with the words you actually
+  say: `Immortility`, `YouTube`, `LeetCode`, `Netflix`, `Wikipedia`, plus the
+  real folder names on your Desktop.
+- **Beam search** (`beam_size=5`) on short phrases instead of greedy decoding.
+- **Transcript repair** normalizes what still slips through — `leet code` →
+  `LeetCode`, `net flix` → `Netflix`, `immortality` → `Immortility`. Ordinary
+  speech is left untouched (see `tests/test_voice_chat.py`).
+- **Hallucination filters** drop the `thanks for watching` / repeated-token junk
+  Whisper invents on silence, while always keeping short answers like `yes` so
+  confirmations still work by voice.
+- **Barge-in**: say `stop` while it's talking and TTS is cut off mid-sentence.
+
+Mishearing something specific? Add it to `ALIASES` in `tools/voice_vocab.py`.
 
 ## How project understanding works
 
@@ -73,7 +101,16 @@ Action Engine `DONE` path runs a verification gate (syntax / build / tests + sem
 
 | Env var | Purpose |
 |---------|---------|
-| `IMMORTILITY_FALLBACK_MODEL` | Optional larger Ollama model for Action Engine escalation after repeated verification failures |
+| `GEMINI_API_KEY` | Google Gemini API key (primary LLM when set) |
+| `GEMINI_MODEL` | Gemini model id (default `gemini-2.0-flash`) |
+| `IMMORTILITY_LLM_PROVIDER` | `gemini` / `ollama` / `auto` |
+| `OLLAMA_MODEL` / `IMMORTILITY_FALLBACK_MODEL` | Local Ollama fallback (kept installed) |
+| `OLLAMA_NUM_CTX` | KV cache size. `16384` suits `qwen3:8b` on 8 GB VRAM |
+| `WHISPER_MODEL` | `small.en` (default) is far more accurate than `base`/`tiny` |
+| `WHISPER_DEVICE` | `cpu` (default) or `cuda`. GPU is probed at startup and falls back to CPU if unusable |
+| `IMMORTILITY_CHROME_PROFILE` | Force which Chrome profile opens sites |
+
+Copy `.env.example` → `.env` and set your key. `.env` is gitignored.
 
 ## Not committed (by design)
 

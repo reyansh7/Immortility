@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 # pyrefly: ignore [missing-import]
-from ollama import chat
+from core.llm import chat
 
 from core.paths import FileContentIndex, normalize_path_key, sanitize_llm_path, to_rel_path
 from editing.edit_planner import EditPlan
@@ -144,7 +144,7 @@ JSON array:"""
             try:
                 response = await asyncio.to_thread(
                     chat,
-                    model="qwen3:8b",
+                    model="auto",
                     messages=[
                         {
                             "role": "system",
@@ -233,11 +233,9 @@ JSON array:"""
         return "\n".join(f"- {p}" for p in lines[:40]) or "- (use paths from project tree)"
 
     def _parse_patch_response(self, raw: str, project_root: Path) -> list[PatchOperation]:
-        content = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-        if "```json" in content:
-            content = content.split("```json")[-1].split("```")[0].strip()
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
+        from core.json_utils import strip_llm_fences
+
+        content = strip_llm_fences(raw)
 
         data = self._extract_json_array(content)
         if data is None:

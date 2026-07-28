@@ -16,9 +16,20 @@ import chromadb
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PERSIST_DIR = ".vector_db"
 CODE_COLLECTION = "code_chunks"
 DOCS_COLLECTION = "documentation"
+
+
+def _default_persist_dir() -> str:
+    try:
+        from core.repo_paths import vector_db_dir
+
+        return str(vector_db_dir())
+    except Exception:
+        return ".vector_db"
+
+
+DEFAULT_PERSIST_DIR = _default_persist_dir()
 
 
 class VectorStore:
@@ -31,10 +42,10 @@ class VectorStore:
 
     def __init__(
         self,
-        persist_dir: str = DEFAULT_PERSIST_DIR,
+        persist_dir: str | None = None,
         collection_name: str = CODE_COLLECTION,
     ) -> None:
-        self._persist_dir = persist_dir
+        self._persist_dir = persist_dir or _default_persist_dir()
         self._collection_name = collection_name
         self._client: chromadb.ClientAPI | None = None
         self._collection: Any = None

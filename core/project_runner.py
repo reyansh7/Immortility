@@ -33,19 +33,13 @@ class ProjectRunner:
 
     @staticmethod
     def detect_services(project_root: str | Path) -> dict[str, bool]:
+        from core.repo_detector import is_nextjs_project, load_package_json
+
         root = Path(project_root).resolve()
-        pkg = root / "package.json"
-        has_next = False
-        if pkg.exists():
-            try:
-                import json
-                data = json.loads(pkg.read_text(encoding="utf-8"))
-                deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
-                has_next = "next" in deps or (root / "next.config.ts").exists() or (root / "next.config.js").exists()
-            except Exception:
-                has_next = True
+        has_pkg = load_package_json(root) is not None
+        has_next = is_nextjs_project(root) if has_pkg else False
         return {
-            "frontend_next": has_next and pkg.exists(),
+            "frontend_next": has_next and has_pkg,
             "backend_fastapi": (root / "backend" / "main.py").exists(),
             "backend_python": (root / "main.py").exists() and not (root / "backend" / "main.py").exists(),
         }

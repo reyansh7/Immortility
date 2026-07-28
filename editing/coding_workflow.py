@@ -301,9 +301,9 @@ class CodingWorkflow:
         if not planner_hint:
             return edit_plan
         try:
-            content = planner_hint
-            if "```json" in content:
-                content = content.split("```json")[-1].split("```")[0].strip()
+            from core.json_utils import strip_llm_fences
+
+            content = strip_llm_fences(planner_hint)
             match = re.search(r"\{[\s\S]*\}", content)
             if not match:
                 return edit_plan
