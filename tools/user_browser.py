@@ -52,20 +52,49 @@ SITE_HOME: dict[str, str] = {
     "wiki": "https://en.wikipedia.org",
 }
 
-# Common misspellings → canonical site key
+_SEARCH_ENGINES = {
+    "youtube", "yt", "google", "wikipedia", "wiki",
+    "leetcode", "github", "reddit", "netflix", "spotify",
+}
+
+# Common misspellings → canonical site key / verb
 _TYPOS: dict[str, str] = {
     "youttube": "youtube",
     "youtub": "youtube",
     "yotube": "youtube",
     "you tube": "youtube",
-    "ytube": "youtube",    "netlfix": "netflix",
+    "ytube": "youtube",
+    "netlfix": "netflix",
     "leetcod": "leetcode",
     "leet code": "leetcode",
     "googel": "google",
     "gogle": "google",
     "wikipeda": "wikipedia",
     "wikipidia": "wikipedia",
+    "searrch": "search",
+    "serach": "search",
+    "serch": "search",
+    "saerch": "search",
+    "searh": "search",
+    "searchh": "search",
 }
+
+_MEDIA_HINTS = re.compile(
+    r"\b("
+    r"vines?|video|videos|song|songs|music|trailer|trailers|episode|episodes|"
+    r"movie|movies|clip|clips|standup|stand[\s-]?up|comedy|podcast|anime|"
+    r"remix|mv|official|live\s+set|concert"
+    r")\b",
+    re.I,
+)
+
+_LOCAL_NOT_WEB = re.compile(
+    r"\b("
+    r"code|file|folder|project|desktop|repo|readme|function|class|bug|"
+    r"error|terminal|vscode|immortility|stocks_app"
+    r")\b",
+    re.I,
+)
 
 
 def find_chrome_exe() -> Path | None:
@@ -106,7 +135,6 @@ def resolve_chrome_profile() -> str:
         last = info.get("last_used")
         if isinstance(last, str) and last:
             return last
-        # fall back to first non-Guest profile with an email / name
         profiles = info.get("info_cache") or {}
         for name, meta in profiles.items():
             if not isinstance(meta, dict):
@@ -124,7 +152,6 @@ def open_urls_in_user_chrome(urls: list[str]) -> tuple[list[str], str]:
     """Open URLs in the user's Chrome profile. Returns (opened, note)."""
     chrome = find_chrome_exe()
     if not chrome:
-        # Fallback: OS default handler
         import webbrowser
 
         opened: list[str] = []
@@ -140,8 +167,6 @@ def open_urls_in_user_chrome(urls: list[str]) -> tuple[list[str], str]:
     opened = []
     for url in urls:
         try:
-            # Do NOT pass --user-data-dir when Chrome is already running —
-            # profile-directory alone reuses the logged-in session.
             subprocess.Popen(
                 [
                     str(chrome),
@@ -162,15 +187,21 @@ def _fix_typos(text: str) -> str:
     low = text.lower()
     for typo, canon in sorted(_TYPOS.items(), key=lambda x: -len(x[0])):
         low = re.sub(rf"(?<![a-z]){re.escape(typo)}(?![a-z])", canon, low)
+    low = re.sub(r"\bsear+ch\b", "search", low)
     return low
+
+
+def _canon_engine(name: str) -> str:
+    n = (name or "").lower().strip()
+    return {"yt": "youtube", "wiki": "wikipedia"}.get(n, n)
 
 
 def _search_url(engine: str, query: str) -> str:
     q = urllib.parse.quote_plus(query.strip())
-    engine = engine.lower().strip()
-    if engine in {"youtube", "yt"}:
+    engine = _canon_engine(engine)
+    if engine == "youtube":
         return f"https://www.youtube.com/results?search_query={q}"
-    if engine in {"wikipedia", "wiki"}:
+    if engine == "wikipedia":
         return f"https://en.wikipedia.org/wiki/Special:Search?search={q}"
     if engine == "leetcode":
         return f"https://leetcode.com/problemset/?search={q}"
@@ -180,8 +211,135 @@ def _search_url(engine: str, query: str) -> str:
         return f"https://www.reddit.com/search/?q={q}"
     if engine == "netflix":
         return f"https://www.netflix.com/search?q={q}"
-    # google / gemini / default web search
+    if engine == "spotify":
+        return f"https://open.spotify.com/search/{q}"
     return f"https://www.google.com/search?q={q}"
+
+
+def _clean_query(q: str) -> str:
+    q = (q or "").strip(" \t\"'`.,:;!?")
+    q = re.sub(
+        r"\b(on|in|with|using|via)\s+"
+        r"(youtube|yt|google|netflix|wikipedia|wiki|chrome|browser)\b",
+        "",
+        q,
+        flags=re.I,
+    )
+    q = re.sub(
+        r"\b(please|for\s+me|now|thanks|thank\s+you)\b",
+        "",
+        q,
+        flags=re.I,
+    )
+    q = re.sub(r"\s+", " ", q).strip(" \t\"'`.,:;!?")
+    return q
+
+
+def _extract_search_intents(low: str) -> list[tuple[str, str]]:
+    """Return (engine, query) pairs from natural language."""
+    hits: list[tuple[str, str]] = []
+
+    patterns = [
+        # open youtube and search <q>  |  youtube search <q>
+        (
+            r"(?:open|launch|go\s+to|pull\s+up)?\s*"
+            r"(youtube|yt|google|netflix|wikipedia|wiki|github|reddit|spotify)\s+"
+            r"(?:and\s+|then\s+|,\s*)?"
+            r"(?:search|find|look\s*up|show|play)\s+(?:for\s+|me\s+)?"
+            r"(.+)$"
+        ),
+        # search/find <q> on/in youtube
+        (
+            r"(?:search|find|look\s*up|google)\s+(?:for\s+)?"
+            r"(.+?)\s+(?:on|in|via|using)\s+"
+            r"(youtube|yt|google|wikipedia|wiki|leetcode|github|reddit|netflix|spotify)\b"
+        ),
+        # youtube search <q>
+        (
+            r"\b(youtube|yt|google|wikipedia|wiki|leetcode|github|reddit|netflix|spotify)\s+"
+            r"(?:search|find)\s+(?:for\s+)?(.+)$"
+        ),
+        # search youtube for <q>
+        (
+            r"(?:search|find)\s+(?:on\s+)?"
+            r"(youtube|yt|google|wikipedia|wiki|leetcode|github|reddit|netflix|spotify)\s+"
+            r"(?:for\s+)?(.+)$"
+        ),
+        # open/play/watch/see <q> on/in youtube
+        (
+            r"(?:open|play|watch|see|show(?:\s+me)?|pull\s+up|stream)\s+"
+            r"(.+?)\s+(?:on|in|via|using)\s+"
+            r"(youtube|yt|netflix|spotify|google|wikipedia|wiki|github|reddit)\b"
+        ),
+        # i want to see|watch <q> on youtube
+        (
+            r"(?:i\s+)?(?:want\s+to|wanna|would\s+like\s+to)\s+"
+            r"(?:see|watch|play|listen\s+to|find|search(?:\s+for)?)\s+"
+            r"(.+?)\s+(?:on|in)\s+"
+            r"(youtube|yt|netflix|spotify|google)\b"
+        ),
+        # i want to see|watch <q>  (default YouTube for media / short queries)
+        (
+            r"(?:i\s+)?(?:want\s+to|wanna|would\s+like\s+to)\s+"
+            r"(?:see|watch|play|listen\s+to)\s+(.+)$"
+        ),
+        r"^\s*(?:watch|play|stream)\s+(.+)$",
+        r"^\s*(?:show\s+me|put\s+on)\s+(.+)$",
+        r"^\s*google\s+(.+)$",
+        r"^\s*(?:wikipedia|wiki)\s+(.+)$",
+        r"^\s*(?:search|find|look\s*up)\s+(?:for\s+)?(.+)$",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, low, flags=re.I)
+        if not m:
+            continue
+        groups = [g.strip() for g in m.groups() if g and g.strip()]
+        if not groups:
+            continue
+
+        if len(groups) == 1:
+            query = _clean_query(groups[0])
+            if not query or len(query) < 2:
+                continue
+            if pat.startswith(r"^\s*google"):
+                hits.append(("google", query))
+                break
+            if pat.startswith(r"^\s*(?:wikipedia|wiki)"):
+                hits.append(("wikipedia", query))
+                break
+            if pat.startswith(r"^\s*(?:search|find|look"):
+                hits.append(("google", query))
+                break
+            if _LOCAL_NOT_WEB.search(query):
+                continue
+            # watch / see / play / show → YouTube for entertainment queries
+            if (
+                _MEDIA_HINTS.search(query)
+                or re.search(r"(?:see|watch|play|stream|show|put\s+on)", pat)
+                or len(query.split()) <= 6
+            ):
+                hits.append(("youtube", query))
+                break
+            continue
+
+        if len(groups) >= 2:
+            a, b = groups[0], groups[1]
+            if a.lower() in _SEARCH_ENGINES:
+                eng, query = a, b
+            elif b.lower() in _SEARCH_ENGINES:
+                eng, query = b, a
+            else:
+                eng, query = "google", f"{a} {b}"
+            query = _clean_query(query)
+            if not query or query.lower() in _SEARCH_ENGINES:
+                continue
+            if query.lower() in {"it", "that", "this", "them", "something"}:
+                continue
+            hits.append((_canon_engine(eng), query))
+            break
+
+    return hits
 
 
 def extract_browser_targets(message: str) -> list[str]:
@@ -192,61 +350,26 @@ def extract_browser_targets(message: str) -> list[str]:
     low = _fix_typos(raw)
     urls: list[str] = []
 
-    # Explicit http(s) links
     for m in re.finditer(r"https?://[^\s<>\"']+", raw, flags=re.I):
         urls.append(m.group(0).rstrip(".,);]"))
 
-    # "open it in google/chrome" → open Google in the user's Chrome
     if re.search(r"\bopen\s+(it|that|them|this)\s+(in|on|with)\s+(google|chrome)\b", low):
         urls.append("https://www.google.com")
         return list(dict.fromkeys(urls))
 
-    # Search patterns (before bare site open)
-    search_patterns = [
-        # search/find <q> on/in youtube|google|…
-        r"(?:search|find|look\s*up|google)\s+(?:for\s+)?(.+?)\s+(?:on|in|via|using)\s+(youtube|yt|google|wikipedia|wiki|leetcode|github|reddit|netflix)\b",
-        # youtube/google search <q>
-        r"\b(youtube|yt|google|wikipedia|wiki|leetcode|github|reddit|netflix)\s+(?:search|find)\s+(?:for\s+)?(.+)$",
-        # search youtube for <q> / search on youtube <q>
-        r"(?:search|find)\s+(?:on\s+)?(youtube|yt|google|wikipedia|wiki|leetcode|github|reddit|netflix)\s+(?:for\s+)?(.+)$",
-        # google <query>  (no "open")
-        r"^\s*google\s+(.+)$",
-        # wikipedia <topic>
-        r"^\s*(?:wikipedia|wiki)\s+(.+)$",
-    ]
     search_engines_hit: set[str] = set()
-    for pat in search_patterns:
-        m = re.search(pat, low, flags=re.I)
-        if not m:
-            continue
-        groups = [g for g in m.groups() if g]
-        if len(groups) == 1 and pat.startswith(r"^\s*google"):
-            urls.append(_search_url("google", groups[0]))
-            search_engines_hit.add("google")
-            continue
-        if len(groups) == 1 and "wikipedia" in pat:
-            urls.append(_search_url("wikipedia", groups[0]))
-            search_engines_hit.add("wikipedia")
-            continue
-        if len(groups) >= 2:
-            a, b = groups[0].strip(), groups[1].strip()
-            engines = {
-                "youtube", "yt", "google", "wikipedia", "wiki",
-                "leetcode", "github", "reddit", "netflix",
-            }
-            if a.lower() in engines:
-                eng = {"yt": "youtube", "wiki": "wikipedia"}.get(a.lower(), a.lower())
-                urls.append(_search_url(a, b))
-                search_engines_hit.add(eng)
-            elif b.lower() in engines:
-                eng = {"yt": "youtube", "wiki": "wikipedia"}.get(b.lower(), b.lower())
-                urls.append(_search_url(b, a))
-                search_engines_hit.add(eng)
-            else:
-                urls.append(_search_url("google", f"{a} {b}"))
-                search_engines_hit.add("google")
+    for eng, query in _extract_search_intents(low):
+        urls.append(_search_url(eng, query))
+        search_engines_hit.add(_canon_engine(eng))
 
-    # Strip browser-choice noise: "in chrome", "on google chrome"
+    # Search wins — do not also open the site homepage
+    if search_engines_hit:
+        out: list[str] = []
+        for u in urls:
+            if u not in out:
+                out.append(u)
+        return out
+
     cleaned = re.sub(
         r"\b(on|in|with|using)\s+(google\s+chrome|chrome|brave|edge|browser|my\s+chrome)\b",
         " ",
@@ -257,25 +380,19 @@ def extract_browser_targets(message: str) -> list[str]:
         for w in (
             "open ", "launch ", "go to ", "navigate ", "browse ",
             "take me to", "pull up ", "show me ", "visit ",
+            "watch ", "play ", "stream ", "see ",
         )
-    ) or cleaned.startswith("open") or cleaned.startswith("launch")
+    ) or cleaned.startswith(("open", "launch", "watch", "play", "search", "find"))
 
-    # Collect site homes in mention order (not alphabetically)
     if wants_open or urls:
-        mentioned: list[tuple[int, str, str]] = []  # (pos, name, url)
+        mentioned: list[tuple[int, str, str]] = []
         for name in SITE_HOME.keys():
             m = re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", cleaned)
             if not m:
                 continue
-            canon = name
-            if name in {"yt"}:
-                canon = "youtube"
-            if name in {"wiki"}:
-                canon = "wikipedia"
-            # Skip home page if we already built a search URL for this engine
+            canon = _canon_engine(name)
             if canon in search_engines_hit or name in search_engines_hit:
                 continue
-            # "in google" as browser choice, not open google.com
             if name == "google" and re.search(r"\b(in|on|with|using)\s+google\b", low) and not re.search(
                 r"\b(open|go to|visit)\s+google\b", low
             ):
@@ -286,15 +403,13 @@ def extract_browser_targets(message: str) -> list[str]:
             if home not in urls:
                 urls.append(home)
 
-    # Bare domain tokens
     if wants_open:
         for m in re.finditer(r"\b([a-z0-9-]+\.(?:com|org|net|io|dev|ai))\b", cleaned):
             u = "https://" + m.group(1)
             if u not in urls:
                 urls.append(u)
 
-    # Dedupe preserving order
-    out: list[str] = []
+    out = []
     for u in urls:
         if u not in out:
             out.append(u)
@@ -309,15 +424,18 @@ def wants_browser_action(message: str) -> bool:
     if re.search(r"\bopen\s+(it|that|them|this)\s+(in|on|with)\s+(google|chrome)\b", low):
         return True
     if extract_browser_targets(message):
-        # exclude pure coding asks that happen to mention a site
         if re.search(
             r"\b(solve|implement|write\s+code|fix\s+bug|refactor)\b", low
-        ) and not re.search(r"\b(open|search|google|browse|go to|visit)\b", low):
+        ) and not re.search(
+            r"\b(open|search|google|browse|go to|visit|watch|play|see)\b", low
+        ):
             return False
         return True
     if re.search(
-        r"\b(search|google|browse|youtube|wikipedia)\b", low
-    ) and re.search(r"\b(for|on|about)\b", low):
+        r"\b(search|google|browse|youtube|wikipedia|watch|play)\b", low
+    ) and re.search(r"\b(for|on|about|see|want)\b", low):
+        return True
+    if re.search(r"(?:i\s+)?(?:want\s+to|wanna)\s+(?:see|watch|play|search)", low):
         return True
     return False
 
@@ -330,4 +448,16 @@ def handle_browser_request(message: str) -> str | None:
     opened, note = open_urls_in_user_chrome(targets)
     if not opened:
         return "I couldn't open those pages in Chrome."
-    return f"Opened in your {note}: {', '.join(opened)}."
+    pretty: list[str] = []
+    for u in opened:
+        parsed = urllib.parse.urlparse(u)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "youtube.com/results" in u:
+            q = (qs.get("search_query") or [""])[0]
+            pretty.append(f"YouTube search for '{q}'" if q else u)
+        elif "google.com/search" in u:
+            q = (qs.get("q") or [""])[0]
+            pretty.append(f"Google search for '{q}'" if q else u)
+        else:
+            pretty.append(u)
+    return f"Opened in your {note}: {', '.join(pretty)}."

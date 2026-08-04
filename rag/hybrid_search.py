@@ -1,4 +1,4 @@
-"""Hybrid search combining semantic (vector) and keyword (BM25) retrieval.
+"""Hybrid search combining semantic (TurboVec) and keyword (BM25) retrieval.
 
 Results are merged and re-ranked using a weighted formula that considers
 semantic similarity, keyword match, file importance and recency.
@@ -32,10 +32,10 @@ class SearchResult:
 
 
 class HybridSearch:
-    """Combines semantic (ChromaDB) and keyword (BM25) search.
+    """Combines semantic (TurboVec) and keyword (BM25) search.
 
     Parameters:
-        vector_store: ChromaDB-backed vector store.
+        vector_store: TurboVec-backed vector store.
         embedding_model: BGE embedding model.
     """
 
@@ -144,15 +144,32 @@ class HybridSearch:
     def _semantic_search(
         self, query: str, n: int, project: str | None
     ) -> list[SearchResult]:
-        """Run semantic (embedding) search against ChromaDB."""
+        """Run semantic (embedding) search against TurboVec."""
         embedding = self._embedder.encode_query(query)
         where = {"project": project} if project else None
         raw = self._store.search(embedding, n_results=n, where=where)
 
-        results: list[SearchResult] = []
+        # Collect higher-is-better scores (TurboVec), else 1 - chroma-style distance
+        scored: list[tuple[float, dict[str, Any]]] = []
         for hit in raw:
-            # ChromaDB returns cosine distance; convert to similarity
-            similarity = max(0.0, 1.0 - hit["distance"])
+            if hit.get("score") is not None:
+                s = float(hit["score"])
+            else:
+                s = max(0.0, 1.0 - float(hit.get("distance", 1.0)))
+            scored.append((s, hit))
+        if not scored:
+            return []
+
+        max_s = max(s for s, _ in scored)
+        min_s = min(s for s, _ in scored)
+        span = max_s - min_s
+
+        results: list[SearchResult] = []
+        for s, hit in scored:
+            if span > 1e-9:
+                similarity = (s - min_s) / span
+            else:
+                similarity = 1.0
             results.append(
                 SearchResult(
                     content=hit["document"],

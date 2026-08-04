@@ -75,7 +75,7 @@ Examples:
         ],
     )
     # Suppress noisy third-party loggers
-    for name in ("chromadb", "sentence_transformers", "httpx", "urllib3"):
+    for name in ("turbovec", "sentence_transformers", "httpx", "urllib3", "openai"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
     # ── Rich console ────────────────────────────────────────────────

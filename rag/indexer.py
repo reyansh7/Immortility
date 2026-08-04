@@ -111,12 +111,23 @@ class Indexer:
 
         entry = self._state.get(filepath)
         if entry and entry.sha256 == file_hash:
-            logger.debug("Unchanged, skipping: %s", filepath)
-            return 0
+            # Orphan repair: hash says indexed but TurboVec has no chunks for this file
+            try:
+                if self._store.count_by_file(filepath) > 0:
+                    logger.debug("Unchanged, skipping: %s", filepath)
+                    return 0
+                logger.warning(
+                    "Hash cache hit but 0 vectors for %s — re-embedding",
+                    filepath,
+                )
+                self._state.remove(filepath)
+            except Exception:
+                logger.debug("Unchanged, skipping: %s", filepath)
+                return 0
 
         t0 = time.perf_counter()
 
-        if entry:
+        if entry and self._state.get(filepath):
             self._store.delete_by_file(filepath)
 
         chunks = self._chunker.chunk_file(filepath, project)

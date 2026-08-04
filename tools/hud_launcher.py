@@ -231,7 +231,7 @@ class _HudHandler(BaseHTTPRequestHandler):
             _chat_history.append({"role": "user", "content": message})
             history_snapshot = [
                 m for m in _chat_history[:-1] if m.get("content")
-            ][-6:]
+            ][-16:]
 
         try:
             from core.agent_state import AgentState
@@ -270,6 +270,13 @@ class _HudHandler(BaseHTTPRequestHandler):
 
         with _history_lock:
             _chat_history.append({"role": "assistant", "content": reply})
+
+        try:
+            from core.chat_thread import update_focus_after_turn
+
+            update_focus_after_turn(message, reply, history_snapshot)
+        except Exception:
+            pass
 
         try:
             from core.agent_state import AgentState

@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rag.indexer import Indexer
 from rag.security_filters import is_denied_dirname, should_index_path
@@ -188,12 +188,15 @@ class ProjectIndexer:
         self,
         project_path: str | Path,
         project_name: str | None = None,
+        *,
+        on_progress: Any | None = None,
     ) -> ProjectInfo:
         """Index an entire project directory.
 
         Args:
             project_path: Root of the project.
             project_name: Display name (defaults to directory name).
+            on_progress: Optional ``callable(done, total, path, chunks_added)``.
 
         Returns:
             A ``ProjectInfo`` with detected metadata and indexing stats.
@@ -209,14 +212,26 @@ class ProjectIndexer:
         # Collect files
         files = list(self._walk(root))
         logger.info("Found %d indexable files.", len(files))
+        if on_progress:
+            try:
+                on_progress(0, len(files), root, 0)
+            except Exception:
+                pass
 
         # Index each file
         total_chunks = 0
-        for fp in files:
+        for i, fp in enumerate(files, 1):
+            added = 0
             try:
-                total_chunks += self._indexer.index_file(fp, name)
+                added = self._indexer.index_file(fp, name)
+                total_chunks += added
             except Exception as exc:
                 logger.error("Failed to index %s: %s", fp, exc)
+            if on_progress:
+                try:
+                    on_progress(i, len(files), fp, added)
+                except Exception:
+                    pass
 
         elapsed = time.perf_counter() - t0
 

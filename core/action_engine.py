@@ -3,14 +3,13 @@ import difflib
 import json
 import logging
 import os
-import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
-from core.llm import chat, active_backend, _ollama_model, _provider
+from core.llm import chat, active_backend, local_model, _provider
 
 from core.agent_state import AgentState
 from core.paths import normalize_path_key, sanitize_llm_path
@@ -55,26 +54,11 @@ def _log_event(
 
 
 def _detect_fallback_model(primary: str) -> str:
+    """Secondary model on the same OpenAI-compatible server (env only)."""
     configured = os.getenv("IMMORTILITY_FALLBACK_MODEL", "").strip()
-    if configured:
+    if configured and configured != primary:
         return configured
-    try:
-        out = subprocess.run(
-            ["ollama", "list"], capture_output=True, text=True, timeout=8, check=False
-        )
-        if out.returncode != 0:
-            return ""
-        candidates = []
-        for line in out.stdout.splitlines()[1:]:
-            name = line.split()[0].strip()
-            low = name.lower()
-            if name == primary:
-                continue
-            if any(x in low for x in ("14b", "27b", "32b", "34b", "70b")):
-                candidates.append(name)
-        return candidates[0] if candidates else ""
-    except Exception:
-        return ""
+    return ""
 
 
 def _tool_call_failed(result: str) -> bool:
@@ -331,12 +315,12 @@ Example done:
     evidence_notes: list[str] = []
     primary_model = "auto"
     current_model = primary_model
-    using_ollama_fallback = False
-    # Keep Ollama as fallback when Gemini is primary
+    using_local_fallback = False
+    # When Gemini is primary, fall back to the configured local OpenAI-compatible model
     if _provider() == "gemini":
-        fallback_model = _ollama_model()
+        fallback_model = local_model()
     else:
-        fallback_model = _detect_fallback_model("qwen3:8b")
+        fallback_model = _detect_fallback_model(local_model())
     before_snapshots: dict[str, str] = {}
     identical_failures: dict[str, int] = {}
 
@@ -401,10 +385,10 @@ Example done:
         try:
             response = await asyncio.to_thread(
                 chat,
-                model=current_model if using_ollama_fallback else "auto",
+                model=current_model if using_local_fallback else "auto",
                 messages=messages,
                 think=False,
-                force_provider="ollama" if using_ollama_fallback else None,
+                force_provider="local" if using_local_fallback else None,
             )
         except Exception as exc:
             msg = f"LLM error: {exc}. Backend={active_backend()}"
@@ -445,14 +429,14 @@ Example done:
                     console.print(f"[red]{err}[/red]")
                     internal_history.append({"role": "user", "content": err})
                     continue
-                if wants_fallback and verification_failures >= 2 and fallback_model and not using_ollama_fallback:
-                    using_ollama_fallback = True
+                if wants_fallback and verification_failures >= 2 and fallback_model and not using_local_fallback:
+                    using_local_fallback = True
                     current_model = fallback_model
-                    msg = f"Switching to Ollama fallback model: {fallback_model}"
+                    msg = f"Switching to local fallback model: {fallback_model}"
                     _log_event("fallback_trigger", user_input or "", failure_reason=msg)
                     internal_history.append({"role": "user", "content": msg})
                     continue
-                if wants_fallback and verification_failures >= 2 and fallback_model and current_model != fallback_model and using_ollama_fallback:
+                if wants_fallback and verification_failures >= 2 and fallback_model and current_model != fallback_model and using_local_fallback:
                     current_model = fallback_model
                     msg = f"Switching to fallback model: {fallback_model}"
                     _log_event("fallback_trigger", user_input or "", failure_reason=msg)

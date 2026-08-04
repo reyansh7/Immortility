@@ -128,6 +128,31 @@ class IndexStateDB:
             conn.execute("DELETE FROM file_hashes WHERE filepath = ?", (filepath,))
             conn.commit()
 
+    def remove_under(self, root: str | Path) -> int:
+        """Delete hash entries for all files under *root* (orphaned-state repair)."""
+        prefix = str(Path(root).resolve())
+        # Normalize for Windows path prefix match
+        if not prefix.endswith(("\\", "/")):
+            prefix_slash = prefix + "\\"
+            prefix_fwd = prefix + "/"
+        else:
+            prefix_slash = prefix
+            prefix_fwd = prefix.replace("\\", "/")
+        with self._lock, self._connect() as conn:
+            rows = conn.execute("SELECT filepath FROM file_hashes").fetchall()
+            to_del = [
+                r["filepath"]
+                for r in rows
+                if r["filepath"] == prefix
+                or r["filepath"].startswith(prefix_slash)
+                or r["filepath"].startswith(prefix_fwd)
+                or r["filepath"].replace("/", "\\").startswith(prefix_slash)
+            ]
+            for fp in to_del:
+                conn.execute("DELETE FROM file_hashes WHERE filepath = ?", (fp,))
+            conn.commit()
+        return len(to_del)
+
     def all_files(self) -> list[str]:
         with self._lock, self._connect() as conn:
             rows = conn.execute("SELECT filepath FROM file_hashes").fetchall()

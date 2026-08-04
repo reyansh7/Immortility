@@ -48,7 +48,7 @@ logging.basicConfig(
     ],
 )
 # Suppress noisy third-party loggers
-for name in ("chromadb", "sentence_transformers", "httpx", "urllib3"):
+for name in ("turbovec", "sentence_transformers", "httpx", "urllib3", "openai"):
     logging.getLogger(name).setLevel(logging.WARNING)
 
 # ── Knowledge Engine (lazy-loaded) ──────────────────────────────────
@@ -162,7 +162,7 @@ async def run_speech_to_speech(memory: str) -> None:
     _voice_enabled = True
     console.print(
         Panel(
-            f"Speech-to-speech via [bold]{active_backend()}[/bold] (Ollama kept as fallback).\n"
+            f"Speech-to-speech via [bold]{active_backend()}[/bold].\n"
             "Speak after the prompt. Say [bold]stop[/bold] while it talks to interrupt, "
             "or [bold]stop[/bold] on your turn / Ctrl+C to leave.\n"
             "[dim]Asks about Desktop/Projects use a live folder scan (not RAG guesses).[/dim]",
@@ -479,16 +479,16 @@ async def _run_coding_workflow(
 
 async def execute_workflow(user_input: str, memory: str, choice: str = "4", is_research: bool = False):
     state = AgentState()
-
+    
     if "leetcode" in user_input.lower():
         skill = LeetCodeSkill()
         await skill.run(user_input)
         return
-
+    
     if is_research:
         researcher = ResearchAgent()
         await researcher.execute(user_input)
-        
+    
     if choice == "4":
         console.print("\n[bold magenta]=== Phase 3 Autonomous Workflow ===[/bold magenta]")
         from core.workflow_engine import WorkflowEngine
@@ -543,24 +543,24 @@ async def execute_workflow(user_input: str, memory: str, choice: str = "4", is_r
         console.print("\n[bold cyan]--- Planner ---[/bold cyan]")
         state.current_task = {"goal": user_input, "step": "Planning"}
         state.save()
-
+        
         ctx = state.get_research_context()
         context_msg = f"Create a step-by-step plan for: {user_input}"
         if ctx:
             context_msg += f"\n\nResearch context:\n{ctx.to_prompt()}"
         if rag_context:
             context_msg += f"\n\nProject context:\n{rag_context}"
-
+            
         plan = await agent_step("Planner", context_msg, memory)
         console.print(plan)
         if choice == "1":
             return
-
+            
     if choice in ("2", "4"):
         console.print("\n[bold cyan]--- Edit Planner ---[/bold cyan]")
         if state.current_task:
             state.current_task["step"] = "Edit Planning"
-            state.save()
+        state.save()
 
         active = None
         try:
@@ -588,16 +588,16 @@ async def execute_workflow(user_input: str, memory: str, choice: str = "4", is_r
             edit_plan = await planner.generate_plan(user_input, rag_context)
             console.print(f"[green]Edit Plan generated for: {edit_plan.goal}[/green]")
             code = str(edit_plan)
-            if choice == "2":
-                return
-
+        if choice == "2":
+            return
+            
     if choice in ("3", "4"):
         console.print("\n[bold cyan]--- Runner ---[/bold cyan]")
         if not state.current_task:
             state.current_task = {"goal": user_input}
         state.current_task["step"] = "Executing"
         state.save()
-
+        
         proj_path = ""
         try:
             active_proj = _get_engine().get_active_project()
@@ -943,7 +943,7 @@ async def main():
     try:
         from core.llm import active_backend
 
-        console.print(f"[bold red]LLM:[/bold red] {active_backend()}  [dim](Ollama kept as fallback)[/dim]")
+        console.print(f"[bold red]LLM:[/bold red] {active_backend()}")
     except Exception:
         pass
     _launch_immortility_hud()
@@ -957,7 +957,7 @@ async def main():
         pass
     memory = MemoryManager().get_full_summary() or ""
     console.print(f"[blue]Memory:[/blue] {memory[:120]}...\n" if memory else "")
-
+    
     setup_registry()
     state = AgentState()
     state.cleanup_on_startup()
@@ -981,7 +981,7 @@ async def main():
 
         threading.Thread(target=_bg_restore, name="ke-restore", daemon=True).start()
         console.print(f"[dim]Restoring project '{proj_name}' in background…[/dim]")
-
+    
     auto_mode = False
     voice_mode = False
     _voice_enabled = False
@@ -1055,12 +1055,12 @@ async def main():
 
         if user_lower in ("exit", "/exit"):
             break
-
+            
         if user_lower == "/auto":
             auto_mode = not auto_mode
             console.print(f"[magenta]AUTO mode {'on' if auto_mode else 'off'}[/magenta]")
             continue
-
+        
         if user_lower == "/hud":
             _launch_immortility_hud()
             continue
@@ -1097,7 +1097,7 @@ async def main():
             state.save()
             console.print("[green]State cleared.[/green]")
             continue
-
+            
         # ── Phase 2 commands ────────────────────────────────────────
         if user_lower.startswith("/open"):
             lines = user_stripped.splitlines()

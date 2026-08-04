@@ -39,6 +39,7 @@ class AgentState:
         self.research_context: dict | str | None = None
         self.browser_state = None
         self.pending_coding_request: dict | str | None = None
+        self.chat_focus: dict | None = None
 
         path = self.state_path
         # Migrate legacy cwd-relative state.json once
@@ -64,6 +65,7 @@ class AgentState:
                 self.research_context = data.get("research_context")
                 self.browser_state = data.get("browser_state")
                 self.pending_coding_request = data.get("pending_coding_request")
+                self.chat_focus = data.get("chat_focus")
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -114,6 +116,7 @@ class AgentState:
             "research_context": self.research_context,
             "browser_state": self.browser_state,
             "pending_coding_request": self.pending_coding_request,
+            "chat_focus": self.chat_focus,
         }
         path = self.state_path
         tmp = path.with_suffix(".tmp")

@@ -94,7 +94,7 @@ def _first_doc_line(text: str) -> str:
 def _vector_db_report() -> str:
     lines = [
         f"**Immortility root:** `{_ROOT}`",
-        f"**Chroma persist dir:** `{_ROOT / '.vector_db'}`",
+        f"**TurboVec persist dir:** `{_ROOT / '.vector_db'}`",
         "",
     ]
     try:
@@ -145,7 +145,7 @@ def _vector_db_report() -> str:
                 snippet = (row.get("document") or "").strip().replace("\n", " ")[:140]
                 lines.append(f"- `{fn}` — {snippet}")
     except Exception as exc:
-        lines.append(f"\nCould not sample ChromaDB: {exc}")
+        lines.append(f"\nCould not sample vector DB: {exc}")
 
     lines.extend(
         [
@@ -208,7 +208,7 @@ def _ensure_self_indexed_hint(stats_chunks: int) -> str:
     return (
         "\n\n_Note: your vector DB has 0 code chunks yet. "
         "Say **index immortility** (or open this project in CLI) to store "
-        "the codebase in Chroma for RAG retrieval._"
+        "the codebase in TurboVec for RAG retrieval._"
     )
 
 
@@ -217,8 +217,8 @@ def handle_self_inspect(message: str) -> str:
     low = (message or "").lower()
     root = project_root()
 
-    # Vector DB / Chroma analysis
-    if re.search(r"\b(vector\s*db|vector\s*database|chromadb|\.vector_db|your\s+vector)\b", low):
+    # Vector DB / TurboVec analysis
+    if re.search(r"\b(vector\s*db|vector\s*database|turbovec|chromadb|\.vector_db|your\s+vector)\b", low):
         report = _vector_db_report()
         chunks = 0
         try:
@@ -271,10 +271,10 @@ def handle_self_inspect(message: str) -> str:
             f"Immortility root: `{root}`\n"
             f"Top-level folders: {', '.join(dirs)}\n\n"
             "Primary self-knowledge surfaces:\n"
-            f"- `{root / 'rag'}` — Chroma vector store, indexer, retriever\n"
+            f"- `{root / 'rag'}` — TurboVec store, indexer, retriever\n"
             f"- `{root / 'knowledge'}` — KnowledgeEngine (RAG + memory facade)\n"
             f"- `{root / 'memory'}` — preferences / conversation / projects\n"
-            f"- `{root / '.vector_db'}` — on-disk Chroma persistence\n"
+            f"- `{root / '.vector_db'}` — on-disk TurboVec + sidecar\n"
         )
         return _summarize_with_llm("Immortility codebase map", evidence, message)
 

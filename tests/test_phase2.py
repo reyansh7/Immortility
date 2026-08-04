@@ -226,7 +226,7 @@ class TestChunker:
 
 
 class TestVectorStore:
-    """Unit tests for the ChromaDB vector store."""
+    """Unit tests for the TurboVec vector store."""
 
     def test_add_and_search(self, vector_db_dir):
         """Add chunks and retrieve them by embedding similarity."""

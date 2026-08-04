@@ -1,18 +1,8 @@
 """Multi-project bulk ingestion pipeline.
 
-Discovers sub-projects under a root directory and indexes them all
-into the shared ChromaDB vector store.  Entirely decoupled from the
-file-patching execution loop — can be run standalone via
-``scripts/ingest_projects.py``.
-
-Key design decisions:
-- Reuses existing ``ProjectIndexer`` per-project (AST-first chunking).
-- SHA-256 delta updates via ``IndexStateDB`` (unchanged files are skipped).
-- Secret/noise denylists skip ``.env``, keys, and high-noise dirs.
-- Batched ChromaDB inserts (500 per batch) to prevent memory spikes.
-- Files > 1 MB are skipped to protect VRAM.
-- Safe ``utf-8`` reading with ``errors='ignore'``.
-- Rich progress bars for live feedback.
+Discovers sub-projects under a root directory and indexes them into the
+shared TurboVec store. Prints line-by-line terminal progress so HUD/CLI
+users can see every project and file milestone.
 """
 
 from __future__ import annotations
@@ -21,7 +11,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rag.embeddings import EmbeddingModel
 from rag.indexer import Indexer
@@ -33,6 +23,22 @@ from rag.project_indexer import (
 from rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+ProgressFn = Callable[[str], None]
+
+
+def _default_progress(msg: str) -> None:
+    try:
+        from rich.console import Console
+
+        Console().print(msg, soft_wrap=True)
+    except Exception:
+        print(msg, flush=True)
+    else:
+        import sys
+
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 
 @dataclass
@@ -48,6 +54,7 @@ class ProjectIngestResult:
     language: str = ""
     framework: str = ""
     error: str = ""
+    skipped: bool = False
 
 
 @dataclass
@@ -66,32 +73,28 @@ class BulkIngestReport:
         """Human-readable summary for logging / CLI output."""
         lines = [
             f"Bulk Ingestion Report: {self.root_dir}",
-            f"  Projects: {self.total_projects}",
+            f"  Projects indexed: {self.total_projects}",
+            f"  Skipped (already had chunks): {len(self.skipped_projects)}",
             f"  Files: {self.total_files}",
             f"  Chunks: {self.total_chunks}",
             f"  Time: {self.total_time_seconds:.1f}s",
         ]
         if self.skipped_projects:
             lines.append(
-                f"  Skipped (already indexed): {', '.join(self.skipped_projects)}"
+                f"  Skipped names: {', '.join(self.skipped_projects)}"
             )
         return "\n".join(lines)
 
 
 class BulkIngestor:
-    """Discovers and indexes multiple projects under a root directory.
-
-    Parameters:
-        vector_store: Shared ChromaDB vector store.
-        embedding_model: BGE embedding model.
-        extra_skip_dirs: Additional directory names to skip.
-    """
+    """Discovers and indexes multiple projects under a root directory."""
 
     def __init__(
         self,
         vector_store: VectorStore | None = None,
         embedding_model: EmbeddingModel | None = None,
         extra_skip_dirs: set[str] | None = None,
+        progress: ProgressFn | None = None,
     ) -> None:
         self._store = vector_store or VectorStore()
         self._embedder = embedding_model or EmbeddingModel()
@@ -101,23 +104,26 @@ class BulkIngestor:
         )
         self._project_indexer = ProjectIndexer(self._indexer)
         self._skip_dirs = set(SKIP_DIRS) | (extra_skip_dirs or set())
+        self._progress = progress or _default_progress
 
-    # ── Discovery ───────────────────────────────────────────────────
+    def _log(self, msg: str) -> None:
+        # Never let console encoding failures abort indexing (Windows cp1252).
+        try:
+            self._progress(msg)
+        except UnicodeEncodeError:
+            try:
+                self._progress(msg.encode("ascii", "replace").decode("ascii"))
+            except Exception as exc:
+                logger.debug("progress callback failed: %s", exc)
+        except Exception as exc:
+            logger.debug("progress callback failed: %s", exc)
+        try:
+            logger.info("%s", msg)
+        except Exception:
+            pass
 
     def discover_projects(self, root_dir: Path) -> list[Path]:
-        """Find all first-level subdirectories that look like projects.
-
-        A directory is considered a project if:
-        - It is a direct child of ``root_dir``.
-        - It is not in ``SKIP_DIRS``.
-        - It is not a hidden directory (starts with ``.``).
-
-        Args:
-            root_dir: Parent directory containing projects.
-
-        Returns:
-            Sorted list of project directory paths.
-        """
+        """Find first-level subdirectories that look like projects."""
         projects: list[Path] = []
         try:
             for child in sorted(root_dir.iterdir()):
@@ -132,75 +138,134 @@ class BulkIngestor:
             logger.error("Permission denied: %s", root_dir)
         return projects
 
-    # ── Index check ─────────────────────────────────────────────────
-
     def is_already_indexed(self, project_name: str) -> bool:
-        """Check if a project already has chunks in the vector store.
-
-        Uses ChromaDB metadata filter to check for existing chunks
-        tagged with this project name.
-
-        Args:
-            project_name: Name of the project.
-
-        Returns:
-            True if chunks exist for this project.
-        """
-        self._store._ensure_connected()
+        """True if TurboVec already has chunks tagged with this project name."""
         try:
-            result = self._store._collection.get(
-                where={"project": project_name},
-                include=[],
-                limit=1,
-            )
-            return bool(result and result.get("ids"))
+            return self._store.count_by_project(project_name) > 0
         except Exception:
             return False
 
-    # ── Single project ──────────────────────────────────────────────
-
     def ingest_project(
-        self, project_path: Path, name: str | None = None
+        self,
+        project_path: Path,
+        name: str | None = None,
+        *,
+        project_index: int | None = None,
+        project_total: int | None = None,
     ) -> ProjectIngestResult:
-        """Index a single project directory.
-
-        Args:
-            project_path: Root of the project.
-            name: Display name (defaults to directory name).
-
-        Returns:
-            ``ProjectIngestResult`` with stats.
-        """
+        """Index a single project directory with visible progress."""
         project_name = name or project_path.name
         result = ProjectIngestResult(
             name=project_name,
             path=str(project_path),
         )
+        prefix = ""
+        if project_index is not None and project_total is not None:
+            prefix = f"[{project_index}/{project_total}] "
 
         t0 = time.perf_counter()
+
+        # If TurboVec has no chunks for this project but index_state still has
+        # file hashes, clear them so we actually re-embed (orphan repair).
         try:
+            if self._store.count_by_project(project_name) == 0:
+                cleared = self._indexer.state.remove_under(project_path)
+                if cleared:
+                    self._log(
+                        f"  {prefix}{project_name}: cleared {cleared} orphaned "
+                        f"hash entries (0 vectors in TurboVec)"
+                    )
+        except Exception as exc:
+            logger.debug("orphan hash clear failed: %s", exc)
+
+        def on_file(done: int, total: int, path: Path, chunks_added: int) -> None:
+            # Print every file so the terminal never looks "stuck"
+            if done == 0:
+                self._log(
+                    f"  {prefix}{project_name}: scanning... found {total} indexable files"
+                )
+                return
+            try:
+                rel = str(path.relative_to(project_path))
+            except Exception:
+                rel = path.name
+            elapsed = time.perf_counter() - t0
+            self._log(
+                f"  {prefix}{project_name}: [{done}/{total}] "
+                f"+{chunks_added} chunks  {rel}  ({elapsed:.1f}s)"
+            )
+
+        try:
+            self._log(f"{prefix}START  {project_name}  ->  {project_path}")
             info: ProjectInfo = self._project_indexer.index_project(
-                project_path, project_name
+                project_path,
+                project_name,
+                on_progress=on_file,
             )
             result.total_files = info.total_files
             result.total_chunks = info.total_chunks
             result.language = info.language
             result.framework = info.framework
             result.time_seconds = round(time.perf_counter() - t0, 2)
-
-            logger.info(
-                "Indexed project '%s': %d files, %d chunks in %.1fs",
-                project_name, info.total_files, info.total_chunks,
-                result.time_seconds,
+            self._log(
+                f"{prefix}DONE   {project_name}: "
+                f"{info.total_files} files -> {info.total_chunks} chunks "
+                f"in {result.time_seconds:.1f}s"
             )
         except Exception as exc:
             result.error = str(exc)
             result.time_seconds = round(time.perf_counter() - t0, 2)
+            self._log(f"{prefix}FAIL   {project_name}: {exc}")
             logger.error("Failed to index '%s': %s", project_name, exc)
 
         return result
 
-    # ── Bulk ingestion ──────────────────────────────────────────────
+    def ingest_paths(
+        self,
+        project_dirs: list[Path],
+        *,
+        force: bool = False,
+    ) -> BulkIngestReport:
+        """Index an explicit list of project directories (HUD bulk path)."""
+        report = BulkIngestReport(
+            root_dir=str(project_dirs[0].parent) if project_dirs else ""
+        )
+        t0 = time.perf_counter()
+        total = len(project_dirs)
+        self._log(f"[bold cyan]Bulk index: {total} project(s)  force={force}[/bold cyan]")
+
+        for i, project_path in enumerate(project_dirs, 1):
+            project_name = project_path.name
+            existing = self._store.count_by_project(project_name)
+            if not force and existing > 0:
+                report.skipped_projects.append(project_name)
+                self._log(
+                    f"[{i}/{total}] SKIP  {project_name} "
+                    f"(already has {existing} chunks)"
+                )
+                report.projects.append(
+                    ProjectIngestResult(
+                        name=project_name,
+                        path=str(project_path),
+                        total_chunks=existing,
+                        skipped=True,
+                    )
+                )
+                continue
+
+            result = self.ingest_project(
+                project_path,
+                project_index=i,
+                project_total=total,
+            )
+            report.projects.append(result)
+
+        report.total_projects = sum(1 for p in report.projects if not p.skipped and not p.error)
+        report.total_files = sum(r.total_files for r in report.projects if not r.skipped)
+        report.total_chunks = sum(r.total_chunks for r in report.projects if not r.skipped)
+        report.total_time_seconds = round(time.perf_counter() - t0, 2)
+        self._log(report.summary())
+        return report
 
     def ingest_all(
         self,
@@ -208,88 +273,18 @@ class BulkIngestor:
         force: bool = False,
         project_filter: str | None = None,
     ) -> BulkIngestReport:
-        """Discover and index all projects under a root directory.
-
-        Args:
-            root_dir: Parent directory containing project subdirectories.
-            force: If True, re-index even if already indexed.
-            project_filter: If set, only index the project with this name.
-
-        Returns:
-            ``BulkIngestReport`` with aggregated stats.
-        """
+        """Discover and index all projects under a root directory."""
         root = Path(root_dir).resolve()
         if not root.is_dir():
             raise FileNotFoundError(f"Root directory not found: {root}")
 
-        report = BulkIngestReport(root_dir=str(root))
-        t0 = time.perf_counter()
-
-        # Discover projects
         project_dirs = self.discover_projects(root)
         if project_filter:
             project_dirs = [
                 d for d in project_dirs
                 if d.name.lower() == project_filter.lower()
             ]
-
-        logger.info(
-            "Discovered %d project(s) under %s", len(project_dirs), root
-        )
-
-        # Try to use rich progress bar
-        try:
-            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
-            use_rich = True
-        except ImportError:
-            use_rich = False
-
-        if use_rich:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                TimeElapsedColumn(),
-            ) as progress:
-                task = progress.add_task(
-                    "Ingesting projects...", total=len(project_dirs)
-                )
-                for project_path in project_dirs:
-                    project_name = project_path.name
-                    progress.update(
-                        task, description=f"Indexing: {project_name}"
-                    )
-
-                    # Skip if already indexed (unless forced)
-                    if not force and self.is_already_indexed(project_name):
-                        report.skipped_projects.append(project_name)
-                        progress.advance(task)
-                        continue
-
-                    result = self.ingest_project(project_path)
-                    report.projects.append(result)
-                    progress.advance(task)
-        else:
-            for i, project_path in enumerate(project_dirs, 1):
-                project_name = project_path.name
-                logger.info(
-                    "[%d/%d] Indexing: %s",
-                    i, len(project_dirs), project_name,
-                )
-
-                if not force and self.is_already_indexed(project_name):
-                    report.skipped_projects.append(project_name)
-                    continue
-
-                result = self.ingest_project(project_path)
-                report.projects.append(result)
-
-        # Aggregate stats
-        report.total_projects = len(report.projects)
-        report.total_files = sum(r.total_files for r in report.projects)
-        report.total_chunks = sum(r.total_chunks for r in report.projects)
-        report.total_time_seconds = round(time.perf_counter() - t0, 2)
-
-        logger.info(report.summary())
+        self._log(f"Discovered {len(project_dirs)} project(s) under {root}")
+        report = self.ingest_paths(project_dirs, force=force)
+        report.root_dir = str(root)
         return report

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import json
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,57 +56,66 @@ class KnowledgeEngine:
     """
 
     _instance: "KnowledgeEngine | None" = None
+    _init_lock = threading.Lock()
 
     def __new__(cls) -> "KnowledgeEngine":
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._init_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._initialized = False
+                    cls._instance = inst
         return cls._instance
 
     def __init__(self) -> None:
         if getattr(self, "_initialized", False):
             return
-        self._initialized = True
+        with self._init_lock:
+            if getattr(self, "_initialized", False):
+                return
+            # Do NOT set _initialized until the end — concurrent HUD threads can
+            # otherwise get a half-built singleton (missing _project_manager).
 
-        # Core components (lazy-loaded where possible)
-        self._embedding_model = EmbeddingModel()
-        self._vector_store = VectorStore()
-        self._docs_store = VectorStore(collection_name="documentation")
-        self._indexer = Indexer(
-            vector_store=self._vector_store,
-            embedding_model=self._embedding_model,
-        )
-        self._project_indexer = ProjectIndexer(self._indexer)
-        self._hybrid_search = HybridSearch(
-            vector_store=self._vector_store,
-            embedding_model=self._embedding_model,
-        )
-        self._retriever = Retriever(
-            vector_store=self._vector_store,
-            embedding_model=self._embedding_model,
-            hybrid_search=self._hybrid_search,
-        )
-        self._memory = MemoryManager()
-        self._context_ranker = ContextRanker()
-        self._retrieval_cache = RetrievalCache()
-        self._graph_engine = GraphEngine()
-        self._kg_db = KnowledgeGraphDB()
-        self._hierarchical = HierarchicalMemory(db=self._kg_db)
-        self._project_manager = ProjectManager(
-            indexer=self._indexer,
-            project_indexer=self._project_indexer,
-            project_memory=self._memory.project,
-            graph_engine=self._graph_engine,
-        )
+            # Core components (lazy-loaded where possible)
+            self._embedding_model = EmbeddingModel()
+            self._vector_store = VectorStore()
+            self._docs_store = VectorStore(collection_name="documentation")
+            self._indexer = Indexer(
+                vector_store=self._vector_store,
+                embedding_model=self._embedding_model,
+            )
+            self._project_indexer = ProjectIndexer(self._indexer)
+            self._hybrid_search = HybridSearch(
+                vector_store=self._vector_store,
+                embedding_model=self._embedding_model,
+            )
+            self._retriever = Retriever(
+                vector_store=self._vector_store,
+                embedding_model=self._embedding_model,
+                hybrid_search=self._hybrid_search,
+            )
+            self._memory = MemoryManager()
+            self._context_ranker = ContextRanker()
+            self._retrieval_cache = RetrievalCache()
+            self._graph_engine = GraphEngine()
+            self._kg_db = KnowledgeGraphDB()
+            self._hierarchical = HierarchicalMemory(db=self._kg_db)
+            self._project_manager = ProjectManager(
+                indexer=self._indexer,
+                project_indexer=self._project_indexer,
+                project_memory=self._memory.project,
+                graph_engine=self._graph_engine,
+            )
 
-        # Wire up invalidation callbacks
-        self._project_manager.set_invalidation_callbacks(
-            retriever_invalidate=self._retriever.invalidate_cache,
-            cache_invalidate=self._retrieval_cache.invalidate_file,
-            structure_reindex=self._on_structure_reindex,
-        )
+            # Wire up invalidation callbacks
+            self._project_manager.set_invalidation_callbacks(
+                retriever_invalidate=self._retriever.invalidate_cache,
+                cache_invalidate=self._retrieval_cache.invalidate_file,
+                structure_reindex=self._on_structure_reindex,
+            )
 
-        logger.info("Knowledge Engine initialised.")
+            self._initialized = True
+            logger.info("Knowledge Engine initialised.")
 
     def _on_structure_reindex(self, filepath: str, project: str) -> None:
         """Keep AST knowledge graph in sync when files change on disk."""
@@ -274,18 +284,37 @@ class KnowledgeEngine:
             return self._graph_engine.query_relationships(symbol)[:2500]
         return ""
 
-    def get_hybrid_results(self, query: str, n_results: int = 8) -> list[RetrievalResult]:
-        """Explicit union of semantic and keyword retrieval from same corpus."""
-        project_name = self.get_active_project_name() or None
-        sem = self._hybrid_search._semantic_search(query, n_results * 2, project_name)
-        key = self._hybrid_search._keyword_search(query, n_results * 2, project_name)
+    def get_hybrid_results(
+        self,
+        query: str,
+        n_results: int = 8,
+        *,
+        project: str | None = None,
+    ) -> list[RetrievalResult]:
+        """Hybrid BM25 + semantic retrieval, optional CrossEncoder rerank."""
+        project_name = project
+        if not project_name:
+            try:
+                from core.project_resolve import resolve_project_from_query
 
-        merged: dict[str, RetrievalResult] = {}
-        for hit in sem + key:
+                project_name = resolve_project_from_query(query)
+            except Exception:
+                project_name = None
+        if not project_name:
+            project_name = self.get_active_project_name() or None
+        # Pull a wider pool so rerank / ContextRanker have room to work
+        pool = max(n_results * 3, 12)
+        hits = self._hybrid_search.search(query, n_results=pool, project=project_name)
+
+        # If scoped search is empty, fall back to global (wrong active project)
+        if not hits and project_name:
+            hits = self._hybrid_search.search(query, n_results=pool, project=None)
+
+        results: list[RetrievalResult] = []
+        for hit in hits:
             md = hit.metadata or {}
-            k = f"{hit.filename}:{md.get('start_line', 0)}"
-            if k not in merged:
-                merged[k] = RetrievalResult(
+            results.append(
+                RetrievalResult(
                     content=hit.content,
                     filename=hit.filename,
                     relevance_score=hit.score,
@@ -297,9 +326,17 @@ class KnowledgeEngine:
                     end_line=md.get("end_line", 0),
                     metadata=md,
                 )
-            else:
-                merged[k].relevance_score = max(merged[k].relevance_score, hit.score)
-        return list(merged.values())[:n_results]
+            )
+
+        try:
+            from rag.reranker import rerank_enabled, rerank_results
+
+            if rerank_enabled() and results:
+                results = rerank_results(query, results, top_k=n_results)
+        except Exception as exc:
+            logger.debug("Rerank skipped: %s", exc)
+
+        return results[:n_results]
 
     def get_routing_context(self, query: str, n_results: int = 6) -> str:
         hits = self.get_hybrid_results(query, n_results=n_results)
@@ -502,7 +539,7 @@ class KnowledgeEngine:
     # ── Documentation import ────────────────────────────────────────
 
     def import_docs(self, name: str, path: str | Path) -> int:
-        """Import documentation files into a separate ChromaDB collection.
+        """Import documentation files into a separate TurboVec collection.
 
         Args:
             name: Name for the documentation set (e.g. "fastapi", "yolo").
@@ -604,6 +641,7 @@ class KnowledgeEngine:
                     "language": r.language,
                     "framework": r.framework,
                     "error": r.error,
+                    "skipped": r.skipped,
                 }
                 for r in report.projects
             ],

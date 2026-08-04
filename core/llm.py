@@ -1,13 +1,19 @@
-"""Unified LLM client — Gemini primary, Ollama fallback.
+"""Unified LLM client — Gemini + OpenAI-compatible local servers.
 
-Drop-in compatible with ``ollama.chat`` return shape:
+Drop-in return shape (same as former ollama.chat):
     {"message": {"role": "assistant", "content": "..."}}
 
+Local inference goes through any OpenAI-compatible HTTP endpoint
+(vLLM in WSL2 by default, Ollama /v1, or a custom base URL). Backend
+is selected by env only — no code changes to swap models/servers.
+
 Env:
-  GEMINI_API_KEY / GOOGLE_API_KEY — enables Gemini
-  GEMINI_MODEL — default gemini-2.0-flash (use gemini-2.0-flash-lite for max speed)
-  IMMORTILITY_LLM_PROVIDER — gemini | ollama | auto (default auto)
-  OLLAMA_MODEL / IMMORTILITY_FALLBACK_MODEL — local fallback model
+  IMMORTILITY_LLM_PROVIDER — vllm | ollama | openai | openai_compat | gemini | auto
+  VLLM_BASE_URL / VLLM_MODEL — default http://127.0.0.1:8000/v1 , Qwen/Qwen3-8B
+  OLLAMA_BASE_URL / OLLAMA_MODEL — default http://127.0.0.1:11434/v1
+  OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL — generic OpenAI-compatible
+  GEMINI_API_KEY / GEMINI_MODEL — optional cloud path
+  IMMORTILITY_FALLBACK_MODEL — secondary model on the same local base URL
 """
 
 from __future__ import annotations
@@ -18,12 +24,21 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from core.reply_format import REPLY_FORMAT_RULES, polish_reply
+
 logger = logging.getLogger(__name__)
 
 _DOTENV_LOADED = False
 _gemini_client: Any = None
 _gemini_client_lock = threading.Lock()
+_openai_clients: dict[str, Any] = {}
+_openai_clients_lock = threading.Lock()
 _warmed = False
+
+DEFAULT_VLLM_BASE = "http://127.0.0.1:8000/v1"
+DEFAULT_VLLM_MODEL = "Qwen/Qwen3-8B"
+DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 
 
 def _load_dotenv() -> None:
@@ -41,7 +56,6 @@ def _load_dotenv() -> None:
     if load_dotenv and env_path.is_file():
         load_dotenv(env_path, override=False)
     elif env_path.is_file():
-        # Minimal parser if python-dotenv missing
         for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -62,15 +76,33 @@ def _gemini_api_key() -> str:
     ).strip()
 
 
+def _local_provider_name() -> str:
+    """Configured local OpenAI-compatible provider (never gemini)."""
+    _load_dotenv()
+    raw = (os.environ.get("IMMORTILITY_LLM_PROVIDER") or "auto").strip().lower()
+    if raw in {"ollama"}:
+        return "ollama"
+    if raw in {"openai", "openai_compat"}:
+        return "openai"
+    if raw in {"vllm", "local"}:
+        return "vllm"
+    # auto / gemini-without-key / unknown → prefer vLLM
+    return "vllm"
+
+
 def _provider() -> str:
     _load_dotenv()
     raw = (os.environ.get("IMMORTILITY_LLM_PROVIDER") or "auto").strip().lower()
     if raw in {"gemini", "google"}:
-        return "gemini" if _gemini_api_key() else "ollama"
+        return "gemini" if _gemini_api_key() else _local_provider_name()
+    if raw in {"vllm", "local"}:
+        return "vllm"
     if raw == "ollama":
         return "ollama"
+    if raw in {"openai", "openai_compat"}:
+        return "openai"
     # auto
-    return "gemini" if _gemini_api_key() else "ollama"
+    return "gemini" if _gemini_api_key() else _local_provider_name()
 
 
 def _gemini_model() -> str:
@@ -95,132 +127,104 @@ def _gemini_client_cached():
         return _gemini_client
 
 
-def _ollama_model(explicit: str | None = None) -> str:
+def _is_placeholder_model(name: str | None) -> bool:
+    if not name:
+        return True
+    low = name.strip().lower()
+    return low in {"auto", "none", ""} or "gemini" in low
+
+
+def local_model(explicit: str | None = None, *, provider: str | None = None) -> str:
+    """Resolve the chat model id for the active OpenAI-compatible backend."""
     _load_dotenv()
-    if explicit and explicit not in {"qwen3:14b", "qwen3:8b", "qwen3.5:4b", "auto"}:
-        # Keep explicit non-default ollama tags when caller asks
-        if ":" in explicit or explicit.startswith("qwen") or explicit.startswith("llama"):
-            return explicit
+    p = (provider or _local_provider_name()).lower()
+    if explicit and not _is_placeholder_model(explicit):
+        return explicit.strip()
+
+    if p == "ollama":
+        return (
+            os.environ.get("OLLAMA_MODEL")
+            or os.environ.get("VLLM_MODEL")
+            or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
+            or DEFAULT_OLLAMA_MODEL
+        ).strip()
+    if p == "openai":
+        return (
+            os.environ.get("OPENAI_MODEL")
+            or os.environ.get("VLLM_MODEL")
+            or os.environ.get("OLLAMA_MODEL")
+            or DEFAULT_VLLM_MODEL
+        ).strip()
+    # vllm / local
     return (
-        os.environ.get("OLLAMA_MODEL")
+        os.environ.get("VLLM_MODEL")
+        or os.environ.get("OLLAMA_MODEL")
         or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
-        or "qwen3:8b"
+        or DEFAULT_VLLM_MODEL
     ).strip()
 
 
-def _ollama_num_ctx() -> int:
-    """Keep KV cache small on 8GB laptops — avoids std::bad_alloc on long chats.
+# Back-compat alias used by action_engine / older imports
+def _ollama_model(explicit: str | None = None) -> str:
+    return local_model(explicit)
 
-    14B+ models need an even tighter default or the CUDA process hard-crashes.
-    """
+
+def _fallback_model(primary: str) -> str | None:
     _load_dotenv()
-    raw = (os.environ.get("OLLAMA_NUM_CTX") or "").strip()
-    model = (
-        os.environ.get("OLLAMA_MODEL")
-        or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
-        or "qwen3:8b"
-    ).lower()
-    default = 4096 if any(x in model for x in ("14b", "27b", "32b", "70b")) else 8192
-    if not raw:
-        return default
-    try:
-        return max(1024, min(32768, int(raw)))
-    except ValueError:
-        return default
+    alt = (os.environ.get("IMMORTILITY_FALLBACK_MODEL") or "").strip()
+    if alt and alt != primary:
+        return alt
+    return None
 
-def _ollama_num_gpu() -> int | None:
-    """Optional partial GPU offload. Lower = more layers on CPU/RAM, less VRAM crash risk.
 
-    Set OLLAMA_NUM_GPU in .env (e.g. 20–28 for qwen3:14b on 8GB).
-    Empty / unset = let Ollama decide (full GPU when it fits).
-    """
+def local_base_url(provider: str | None = None) -> str:
+    """Base URL for the OpenAI-compatible chat endpoint (includes /v1)."""
     _load_dotenv()
-    raw = (os.environ.get("OLLAMA_NUM_GPU") or "").strip()
-    if not raw:
-        return None
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return None
+    p = (provider or _local_provider_name()).lower()
+    if p == "ollama":
+        return (
+            os.environ.get("OLLAMA_BASE_URL")
+            or os.environ.get("OPENAI_BASE_URL")
+            or DEFAULT_OLLAMA_BASE
+        ).rstrip("/")
+    if p == "openai":
+        return (
+            os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("VLLM_BASE_URL")
+            or DEFAULT_VLLM_BASE
+        ).rstrip("/")
+    return (
+        os.environ.get("VLLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or DEFAULT_VLLM_BASE
+    ).rstrip("/")
 
 
-def _is_vram_oom(exc: BaseException) -> bool:
-    msg = str(exc).lower()
-    return any(
-        s in msg
-        for s in (
-            "out of memory",
-            "out-of-memory",
-            "cudamalloc",
-            "cuda0 buffer",
-            "unable to allocate cuda",
-            "ggml_cuda",
-            "cuda malloc",
-            "bad_alloc",
-            "failed to allocate memory",
-            "prompt cache",
-            "cuda error",
-            "shared object initialization failed",
-            "0xc0000409",
-            "stack-based buffer",
-            "llama-server process has terminated",
-            "status code: 500",
-        )
-    )
+def local_api_key(provider: str | None = None) -> str:
+    _load_dotenv()
+    p = (provider or _local_provider_name()).lower()
+    if p == "openai":
+        return (os.environ.get("OPENAI_API_KEY") or "not-needed").strip()
+    if p == "ollama":
+        return (os.environ.get("OLLAMA_API_KEY") or os.environ.get("OPENAI_API_KEY") or "ollama").strip()
+    return (os.environ.get("VLLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "not-needed").strip()
 
 
-def _is_cuda_crash(exc: BaseException) -> bool:
-    """GPU driver / llama-server hard crashes — retry smaller model on GPU then CPU."""
-    msg = str(exc).lower()
-    return any(
-        s in msg
-        for s in (
-            "cuda error",
-            "shared object initialization failed",
-            "0xc0000409",
-            "llama-server process has terminated",
-            "stack-based buffer",
-        )
-    )
-
-
-def _installed_ollama_models() -> set[str]:
-    try:
-        import subprocess
-
-        proc = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
-        names: set[str] = set()
-        for line in (proc.stdout or "").splitlines()[1:]:
-            parts = line.split()
-            if parts:
-                names.add(parts[0].strip())
-        return names
-    except Exception:
-        return set()
-
-
-def _light_ollama_candidates(primary: str) -> list[str]:
-    """Prefer smaller installed models when the primary OOM's on GPU."""
-    preferred = [
-        "qwen3:8b",
-        "qwen3.5:4b",
-        "llama3.2:3b",
-        "llama3.2:1b",
-        "qwen2.5:3b",
-        "phi3:mini",
-        "gemma2:2b",
-        "qwen2.5:1.5b",
-    ]
-    installed = _installed_ollama_models()
-    if installed:
-        return [t for t in preferred if t in installed and t != primary]
-    return [t for t in preferred if t != primary]
+def _openai_client(base_url: str, api_key: str):
+    key = f"{base_url}|{api_key}"
+    with _openai_clients_lock:
+        cached = _openai_clients.get(key)
+        if cached is not None:
+            return cached
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise RuntimeError(
+                "openai package required for local LLM. pip install openai"
+            ) from exc
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
+        _openai_clients[key] = client
+        return client
 
 
 def active_backend() -> str:
@@ -228,7 +232,7 @@ def active_backend() -> str:
     p = _provider()
     if p == "gemini":
         return f"gemini:{_gemini_model()}"
-    return f"ollama:{_ollama_model()}"
+    return f"{p}:{local_model(provider=p)}@{local_base_url(p)}"
 
 
 def _messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -244,7 +248,6 @@ def _messages_to_gemini(messages: list[dict[str, Any]]) -> tuple[str | None, lis
         if role == "system":
             system_parts.append(text)
             continue
-        # Gemini uses user / model
         g_role = "model" if role in {"assistant", "model"} else "user"
         contents.append({"role": g_role, "parts": [{"text": text}]})
     system = "\n\n".join(system_parts) if system_parts else None
@@ -296,78 +299,228 @@ def _chat_gemini(
     return {"message": {"role": "assistant", "content": text.strip()}}
 
 
+def _normalize_openai_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for m in messages:
+        role = (m.get("role") or "user").lower()
+        if role == "model":
+            role = "assistant"
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = "\n".join(str(x) for x in content)
+        out.append({"role": role, "content": str(content)})
+    return out
+
+
+def _hint_for_provider(provider: str) -> str:
+    if provider == "ollama":
+        return (
+            "Is Ollama running with its OpenAI endpoint? "
+            "Start `ollama serve` and set OLLAMA_BASE_URL=http://127.0.0.1:11434/v1"
+        )
+    if provider == "openai":
+        return "Check OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL."
+    return (
+        "Is vLLM running in WSL2? "
+        "From WSL: `bash scripts/wsl/start_vllm.sh` "
+        f"(expects {DEFAULT_VLLM_BASE})"
+    )
+
+
+def _ollama_api_root(openai_v1_url: str | None = None) -> str:
+    """Map OpenAI-compat base (.../v1) to Ollama native root."""
+    base = (openai_v1_url or local_base_url("ollama")).rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base.rstrip("/")
+
+
+def _chat_ollama_native(
+    messages: list[dict[str, Any]],
+    model: str | None = None,
+    *,
+    max_output_tokens: int | None = None,
+    temperature: float = 0.4,
+) -> dict[str, Any]:
+    """Native Ollama /api/chat with think=false (Qwen3 otherwise empties content)."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    tag = local_model(model, provider="ollama")
+    root = _ollama_api_root()
+    url = f"{root}/api/chat"
+    options: dict[str, Any] = {
+        "temperature": float(temperature) if temperature is not None else 0.4,
+    }
+    if max_output_tokens is not None and int(max_output_tokens) > 0:
+        options["num_predict"] = int(max_output_tokens)
+
+    payload = {
+        "model": tag,
+        "messages": _normalize_openai_messages(messages),
+        "stream": False,
+        "think": False,
+        "options": options,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {root} ({exc}). {_hint_for_provider('ollama')}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Ollama native chat failed on '{tag}' at {root}: {exc}. "
+            f"{_hint_for_provider('ollama')}"
+        ) from exc
+
+    msg = body.get("message") or {}
+    text = (msg.get("content") or "").strip()
+    if not text:
+        # Extremely defensive: some builds still stash text under thinking keys
+        for key in ("thinking", "reasoning"):
+            alt = (msg.get(key) or body.get(key) or "").strip()
+            if alt and len(alt) < 400 and "\n" not in alt[:80]:
+                text = alt
+                break
+    if not text:
+        logger.warning("Ollama returned empty content for model %s", tag)
+    return {"message": {"role": "assistant", "content": text}}
+
+
+def _message_text_from_openai_choice(choice: Any) -> str:
+    """Prefer content; never treat long Qwen 'reasoning' traces as the answer."""
+    if choice is None or choice.message is None:
+        return ""
+    msg = choice.message
+    text = (getattr(msg, "content", None) or "").strip()
+    if text:
+        return text
+    # Dump for debugging empty replies
+    try:
+        dumped = msg.model_dump() if hasattr(msg, "model_dump") else {}
+        reasoning = (dumped.get("reasoning") or "").strip()
+        if reasoning:
+            logger.warning(
+                "OpenAI-compat reply had empty content and %d chars of reasoning "
+                "(Qwen think mode). Prefer Ollama native API with think=false.",
+                len(reasoning),
+            )
+    except Exception:
+        pass
+    return ""
+
+
+def _chat_openai_compat(
+    messages: list[dict[str, Any]],
+    model: str | None = None,
+    *,
+    provider: str | None = None,
+    json_mode: bool = False,
+    max_output_tokens: int | None = None,
+    temperature: float = 0.4,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Chat via any OpenAI-compatible server (vLLM / Ollama / custom)."""
+    p = (provider or _local_provider_name()).lower()
+    if p in {"local", "vllm"}:
+        p = "vllm"
+
+    # Qwen3 via Ollama OpenAI-compat often fills `reasoning` and leaves
+    # `content` empty — use native /api/chat with think=false instead.
+    if p == "ollama":
+        return _chat_ollama_native(
+            messages,
+            model=model,
+            max_output_tokens=max_output_tokens,
+            temperature=float(temperature) if temperature is not None else 0.4,
+        )
+
+    base = local_base_url(p)
+    api_key = local_api_key(p)
+    tag = local_model(model, provider=p)
+    client = _openai_client(base, api_key)
+
+    kwargs = dict(kwargs)
+    kwargs.pop("think", None)
+    kwargs.pop("options", None)
+    kwargs.pop("format", None)
+    extra_body = dict(kwargs.pop("extra_body", None) or {})
+
+    create_kwargs: dict[str, Any] = {
+        "model": tag,
+        "messages": _normalize_openai_messages(messages),
+        "temperature": float(temperature) if temperature is not None else 0.4,
+    }
+    if max_output_tokens is not None and int(max_output_tokens) > 0:
+        create_kwargs["max_tokens"] = int(max_output_tokens)
+    if json_mode:
+        create_kwargs["response_format"] = {"type": "json_object"}
+    if extra_body:
+        create_kwargs["extra_body"] = extra_body
+
+    def _call(model_tag: str) -> dict[str, Any]:
+        resp = client.chat.completions.create(**{**create_kwargs, "model": model_tag})
+        choice = (resp.choices or [None])[0]
+        text = _message_text_from_openai_choice(choice)
+        return {"message": {"role": "assistant", "content": text}}
+
+    try:
+        return _call(tag)
+    except Exception as exc:
+        err = str(exc).lower()
+        connectionish = any(
+            s in err
+            for s in (
+                "connection",
+                "connect",
+                "refused",
+                "timed out",
+                "timeout",
+                "name or service not known",
+                "nodename nor servname",
+                "10061",
+                "actively refused",
+            )
+        )
+        alt = _fallback_model(tag)
+        if alt and not connectionish:
+            try:
+                logger.warning(
+                    "Local LLM %s failed (%s) — retrying fallback model %s",
+                    tag,
+                    exc,
+                    alt,
+                )
+                return _call(alt)
+            except Exception as alt_exc:
+                logger.debug("Fallback model %s failed: %s", alt, alt_exc)
+
+        if connectionish:
+            raise RuntimeError(
+                f"Cannot reach OpenAI-compatible LLM at {base} ({exc}). {_hint_for_provider(p)}"
+            ) from exc
+        raise RuntimeError(
+            f"Local LLM error on model '{tag}' at {base}: {exc}. {_hint_for_provider(p)}"
+        ) from exc
+
+
+# Back-compat name
 def _chat_ollama(
     messages: list[dict[str, Any]],
     model: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    from ollama import chat as ollama_chat
-
-    tag = _ollama_model(model)
-    # Drop Immortility-only kwargs Ollama may not understand in older clients
-    kwargs = dict(kwargs)
-    kwargs.pop("think", None)
-    max_tokens = kwargs.pop("max_output_tokens", None)
-    temperature = kwargs.pop("temperature", None)
-    options = dict(kwargs.pop("options", None) or {})
-    options.setdefault("num_ctx", _ollama_num_ctx())
-    num_gpu = _ollama_num_gpu()
-    if num_gpu is not None:
-        options.setdefault("num_gpu", num_gpu)
-    if max_tokens:
-        options.setdefault("num_predict", int(max_tokens))
-    if temperature is not None:
-        options.setdefault("temperature", float(temperature))
-
-    def _call(model_tag: str, opts: dict[str, Any]) -> dict[str, Any]:
-        call_kwargs = dict(kwargs)
-        if opts:
-            call_kwargs["options"] = opts
-        try:
-            return ollama_chat(model=model_tag, messages=messages, think=False, **call_kwargs)
-        except TypeError:
-            return ollama_chat(model=model_tag, messages=messages, **call_kwargs)
-
-    try:
-        return _call(tag, options)
-    except Exception as exc:
-        recoverable = _is_vram_oom(exc) or _is_cuda_crash(exc)
-        if not recoverable:
-            raise
-
-        # 0) CUDA hard-crash on 14b → try smaller model on GPU first (faster)
-        if _is_cuda_crash(exc) or "14b" in tag:
-            for alt in _light_ollama_candidates(tag):
-                try:
-                    logger.warning(
-                        "Ollama GPU crash on %s — trying smaller model %s", tag, alt
-                    )
-                    return _call(alt, options)
-                except Exception as alt_exc:
-                    logger.debug("Ollama alt GPU %s failed: %s", alt, alt_exc)
-
-        # 1) Same model on CPU (num_gpu=0)
-        logger.warning("Ollama GPU failure on %s — retrying on CPU", tag)
-        cpu_opts = {**options, "num_gpu": 0}
-        try:
-            return _call(tag, cpu_opts)
-        except Exception as cpu_exc:
-            logger.warning("Ollama CPU retry failed (%s)", cpu_exc)
-
-        # 2) Smaller installed models on CPU
-        for alt in _light_ollama_candidates(tag):
-            try:
-                logger.warning("Ollama recovery — trying %s on CPU", alt)
-                return _call(alt, {**options, "num_gpu": 0})
-            except Exception as alt_exc:
-                logger.debug("Ollama alt %s failed: %s", alt, alt_exc)
-
-        raise RuntimeError(
-            f"Local Ollama crashed or ran out of memory loading '{tag}'. "
-            f"Your GPU likely cannot run this model stably (14B ≈ 9GB+ VRAM). "
-            f"Fix: set OLLAMA_MODEL=qwen3:8b in .env, restart Ollama, close other GPU apps. "
-            f"Detail: {exc}"
-        ) from exc
+    return _chat_openai_compat(messages, model=model, provider="ollama", **kwargs)
 
 
 def chat(
@@ -377,7 +530,8 @@ def chat(
     force_provider: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Provider-agnostic chat. Prefers Gemini when configured, else Ollama."""
+    """Provider-agnostic chat. Gemini when configured; else OpenAI-compatible local."""
+    del think  # unused — kept for call-site compatibility
     messages = messages or []
     fmt = kwargs.pop("format", None)
     json_mode = fmt == "json"
@@ -385,12 +539,13 @@ def chat(
     temperature = kwargs.pop("temperature", 0.4)
     provider = (force_provider or _provider()).lower()
 
+    if provider in {"local"}:
+        provider = "vllm"
+
     if model and "gemini" in str(model).lower() and not force_provider:
         provider = "gemini"
 
-    ollama_kwargs = dict(kwargs)
-    if fmt is not None:
-        ollama_kwargs["format"] = fmt
+    local_kwargs = dict(kwargs)
 
     if provider in {"gemini", "google"}:
         gemini_error: Exception | None = None
@@ -408,58 +563,67 @@ def chat(
             gemini_error = exc
             err_l = str(exc).lower()
             quota_hit = "429" in err_l or "resource_exhausted" in err_l or "quota" in err_l
-            # Sibling flash models share the same free-tier quota — don't burn another call
             if not quota_hit:
                 current = _gemini_model()
                 alt = "gemini-2.0-flash" if "lite" in current else "gemini-2.0-flash-lite"
                 if alt != current:
                     try:
                         logger.warning("Gemini %s failed (%s); retry %s", current, exc, alt)
-                        result = _chat_gemini(
+                        return _chat_gemini(
                             messages,
                             model=alt,
                             json_mode=bool(json_mode),
                             max_output_tokens=max_output_tokens,
                             temperature=float(temperature) if temperature is not None else 0.4,
                         )
-                        return result
                     except Exception as exc2:
                         gemini_error = exc2
-                        logger.warning("Gemini retry failed (%s); falling back to Ollama", exc2)
+                        logger.warning("Gemini retry failed (%s); falling back to local", exc2)
                 else:
-                    logger.warning("Gemini failed (%s); falling back to Ollama", exc)
+                    logger.warning("Gemini failed (%s); falling back to local", exc)
             else:
-                logger.warning("Gemini quota/rate-limit (%s); falling back to Ollama", exc)
+                logger.warning("Gemini quota/rate-limit (%s); falling back to local", exc)
         try:
-            return _chat_ollama(
+            return _chat_openai_compat(
                 messages,
-                model=None,  # use OLLAMA_MODEL / light default — never pass "auto"/gemini ids
+                model=None,
+                provider=_local_provider_name(),
+                json_mode=bool(json_mode),
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
-                **ollama_kwargs,
+                **local_kwargs,
             )
-        except Exception as ollama_exc:
+        except Exception as local_exc:
             raise RuntimeError(
                 f"Gemini unavailable ({gemini_error}); "
-                f"Ollama fallback failed ({ollama_exc})"
-            ) from ollama_exc
+                f"local OpenAI-compatible fallback failed ({local_exc})"
+            ) from local_exc
 
-    return _chat_ollama(
+    # Force local OpenAI-compatible path
+    local_p = provider if provider in {"vllm", "ollama", "openai"} else _local_provider_name()
+    explicit = None if _is_placeholder_model(str(model) if model else None) else str(model)
+    return _chat_openai_compat(
         messages,
-        model=model if model not in {"auto", None} and "gemini" not in str(model).lower() else None,
+        model=explicit,
+        provider=local_p,
+        json_mode=bool(json_mode),
         max_output_tokens=max_output_tokens,
         temperature=temperature,
-        **ollama_kwargs,
+        **local_kwargs,
     )
 
 
 _FAST_SYSTEM = (
     "You are Immortility, Reyansh's desktop AI assistant. "
-    "Be warm, capable, and concise — 1–4 short sentences unless he asks for detail. "
-    "You can open sites/apps, control the PC via tools, list Desktop projects, and help with code. "
+    "Be warm, capable, and concise. "
+    "You can open sites/apps, search YouTube/Google in his Chrome, "
+    "list Desktop projects, and help with code. "
+    "Never claim you cannot open YouTube or websites — browser opens are real. "
     "Never claim to be BERT. If asked what model you are, say you are Immortility "
-    "running locally via Ollama (qwen3:8b by default; 14b if your GPU allows) with optional Gemini when available. "
-    "Address him as Reyansh. No markdown fences, no long preambles."
+    "running locally via an OpenAI-compatible server (vLLM Qwen3-8B by default; "
+    "Ollama or other backends via config) with optional Gemini when available. "
+    "Address him as Reyansh. No long preambles. "
+    f"{REPLY_FORMAT_RULES}"
 )
 
 
@@ -476,10 +640,12 @@ def fast_chat(
         {"role": "system", "content": system or _FAST_SYSTEM},
     ]
     if history:
-        for m in history[-8:]:
+        for m in history[-16:]:
             role = m.get("role") or "user"
             content = (m.get("content") or "").strip()
             if content and role in {"user", "assistant", "model"}:
+                if role == "assistant" and len(content) > 1200:
+                    content = content[:1199].rstrip() + "…"
                 messages.append({"role": role, "content": content})
     if extra_context:
         messages.append(
@@ -497,7 +663,13 @@ def fast_chat(
         temperature=0.35,
     )
     reply = (result.get("message") or {}).get("content") or ""
-    return str(reply).strip() or "I did not get a response. Try again."
+    reply = polish_reply(str(reply))
+    if reply:
+        return reply
+    return (
+        "I got an empty reply from the local model (Qwen think-mode quirk). "
+        "Try again — Immortility now uses Ollama with thinking disabled."
+    )
 
 
 def warm_llm() -> None:
@@ -509,7 +681,6 @@ def warm_llm() -> None:
     try:
         if _provider() in {"gemini", "google"} and _gemini_api_key():
             _gemini_client_cached()
-            # Tiny ping to open the connection / cache model path
             chat(
                 model="auto",
                 messages=[

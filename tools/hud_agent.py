@@ -30,12 +30,14 @@ _APP_ALIASES = {
 }
 
 _ACTION_HINTS = (
-    "open ", "launch ", "start ", "run ", "create ", "delete ", "write ",
+    "open ", "launch ", "run ", "create ", "delete ", "write ",
     "edit ", "fix ", "implement ", "refactor ", "install ", "download ",
     "make a ", "make the ", "add ", "remove ", "rename ", "build ",
-    "kill ", "close ", "search ", "go to ", "navigate ", "browse ",
+    "kill ", "close ", "go to ", "navigate ", "browse ",
     "analyze ", "analyse ", "review ", "look at ", "check ",
     "read ", "list ", "inspect ", "summarize ", "summarise ",
+    "start server", "start the server", "start the app", "start npm",
+    "start uvicorn", "start my ",
 )
 
 _CHAT_ONLY = frozenset({
@@ -186,9 +188,74 @@ def _is_analysis_request(message: str) -> bool:
     return any(h in low for h in _ANALYSIS_HINTS)
 
 
+def _try_open_explicit_folder_path(message: str) -> str | None:
+    """Open an explicit Windows folder path exactly as requested."""
+    low = (message or "").lower()
+    if not any(w in low for w in ("open ", "launch ", "show ")):
+        return None
+    m = re.search(r"[A-Za-z]:\\[^\s\"']+", message)
+    if not m:
+        return None
+    from pathlib import Path
+    import shutil
+    import subprocess
+    import sys
+
+    p = Path(m.group(0))
+    if not p.is_dir():
+        return None
+    code_bin = shutil.which("code")
+    try:
+        if code_bin:
+            if sys.platform == "win32":
+                subprocess.Popen(f'code "{p}"', shell=True)
+            else:
+                subprocess.Popen([code_bin, str(p)])
+            return f"Opened `{p}` in VS Code."
+        subprocess.Popen(
+            ["explorer", str(p)] if sys.platform == "win32" else ["xdg-open", str(p)]
+        )
+        return f"Opened `{p}` in Explorer."
+    except Exception:
+        return None
+
+
+def _try_scan_single_folder(message: str) -> str | None:
+    """Deterministic scan for one folder using only live filesystem data."""
+    low = (message or "").lower()
+    if not re.search(r"\b(scan|analy[sz]e|inspect|review|tell me about|about)\b", low):
+        return None
+    if not any(w in low for w in ("folder", "desktop", "project", "number ", "no.", "#")):
+        return None
+    try:
+        from core.desktop_scanner import format_single_folder_report, resolve_scan_target
+
+        target = resolve_scan_target(message)
+        if target is None:
+            return None
+        return format_single_folder_report(target)
+    except Exception:
+        return None
+
+
 def _try_open_project_folder(message: str) -> str | None:
     """Open a Desktop project folder in VS Code / Explorer when asked."""
     low = message.lower()
+    # Explicit paths are handled by _try_open_explicit_folder_path.
+    if re.search(r"[A-Za-z]:\\[^\s\"']+", message):
+        return None
+    # Never steal /open indexing or "index/read projects" into VS Code
+    if low.strip().startswith("/open"):
+        return None
+    try:
+        from tools.hud_knowledge import wants_index_or_ingest
+
+        if wants_index_or_ingest(message):
+            return None
+    except Exception:
+        pass
+    if re.search(r"\b(index|ingest|reindex|embed)\b", low):
+        return None
     if not any(w in low for w in ("open ", "launch ", "show ", "analyze", "analyse", "review", "check")):
         return None
 
@@ -373,6 +440,24 @@ def handle_hud_request(
     except Exception as exc:
         logger.debug("pending check: %s", exc)
 
+    # Knowledge: /open indexing + bulk desktop ingest + "read the projects"
+    # MUST run before projects-scan / VS Code folder open (those used to steal these).
+    try:
+        from tools.hud_knowledge import handle_hud_knowledge, wants_index_or_ingest
+
+        if wants_index_or_ingest(message) or message.lower().startswith("/open"):
+            from rich.console import Console
+
+            Console().print(
+                f"[bold cyan][HUD → Knowledge/Index][/bold cyan] {message[:140]}"
+            )
+            reply = handle_hud_knowledge(message)
+            if reply:
+                return (multi_prefix + reply).strip() if multi_prefix else reply
+    except Exception as exc:
+        logger.exception("HUD knowledge/index failed")
+        return f"Indexing failed: {exc}"
+
     # Face / HUD beautify — deterministic edit (local 8B fails on 1000-line HTML)
     if _wants_face_beautify(message) or (
         _wants_edits(message)
@@ -432,6 +517,11 @@ def handle_hud_request(
 
     # (folder + browser already handled above via multi_actions)
 
+    # Single-folder deterministic scan (no inferred/fake files).
+    one_scan = _try_scan_single_folder(message)
+    if one_scan:
+        return (multi_prefix + one_scan).strip()
+
     # Desktop / projects listing
     try:
         from core.desktop_scanner import (
@@ -447,7 +537,7 @@ def handle_hud_request(
     except Exception:
         pass
 
-    # Index Immortility into local Chroma (store code for RAG)
+    # Index Immortility into local TurboVec (store code for RAG)
     low_msg = message.lower().strip()
     if re.search(
         r"\b(index|ingest|remember)\b.*\b(immortility|yourself|your\s+code|own\s+code)\b",
@@ -497,11 +587,28 @@ def handle_hud_request(
         parts = [p for p in (browser_reply, app_reply) if p]
         return (multi_prefix + " ".join(parts)).strip()
 
+    explicit_open = _try_open_explicit_folder_path(message)
+    if explicit_open:
+        return (multi_prefix + explicit_open).strip()
+
     # Open a known Desktop project folder (SkillLens, etc.)
     project_open = _try_open_project_folder(message)
 
     # Full agent for files / coding / complex actions
-    if _wants_action(message) or (browser_reply and not only_open) or _is_analysis_request(message):
+    # Advisory follow-ups ("how do I start the project?") stay in chat with history —
+    # never route them to the action engine (which web-searches and dumps Medium links).
+    from core.chat_thread import is_advisory_chat
+
+    advisory = is_advisory_chat(message)
+    use_action = (
+        not advisory
+        and (
+            _wants_action(message)
+            or (browser_reply and not only_open)
+            or _is_analysis_request(message)
+        )
+    )
+    if use_action:
         prefix = multi_prefix
         if browser_reply:
             prefix += browser_reply + "\n"
@@ -554,7 +661,9 @@ def handle_hud_request(
                 )
 
             result = _run_async(_act())
-            return (prefix + (result or "Done.")).strip()
+            from core.reply_format import polish_reply
+
+            return (prefix + polish_reply(result or "Done.")).strip()
         except Exception as exc:
             logger.exception("HUD action failed")
             if prefix:
@@ -565,46 +674,124 @@ def handle_hud_request(
         return project_open
 
     # Conversational reply (with local memory + optional RAG snippets)
+    from core.chat_thread import (
+        focus_context_for_message,
+        history_for_model,
+        update_focus_after_turn,
+    )
     from core.llm import fast_chat
+    from core.project_resolve import (
+        known_project_names,
+        project_path_for_name,
+        resolve_project_from_query,
+    )
+    from core.reply_format import REPLY_FORMAT_RULES
     from tools.self_inspect import project_root
 
     root = project_root()
     rag_bits = ""
     memory_bits = ""
+    mentioned = resolve_project_from_query(message)
+    project_note = ""
+    thread_note = focus_context_for_message(message)
+
     try:
         from knowledge.engine import KnowledgeEngine
 
         ke = KnowledgeEngine()
-        rag_bits = (ke.get_routing_context(message, n_results=4) or "").strip()
+        if mentioned:
+            try:
+                from core.agent_state import AgentState
+
+                st = AgentState()
+                st.active_project = mentioned
+                st.save()
+            except Exception:
+                pass
+            chunks = 0
+            try:
+                chunks = ke._vector_store.count_by_project(mentioned)  # noqa: SLF001
+            except Exception:
+                chunks = 0
+            ppath = project_path_for_name(mentioned)
+            if chunks <= 0:
+                where = str(ppath) if ppath else mentioned
+                return (
+                    f"I know you mean {mentioned} "
+                    f"({where}), but it is not in TurboVec yet "
+                    f"(0 chunks — likely a broken earlier index pass).\n\n"
+                    f"Say `/open {where}` or index {mentioned} and I will "
+                    f"re-embed it, then ask me again."
+                )
+            project_note = (
+                f"Reyansh is asking about project `{mentioned}` "
+                f"({ppath or 'Desktop/Projects'}), which has {chunks} TurboVec chunks. "
+                f"Answer from retrieved code context about THIS project only — "
+                f"not a generic stock-trading app."
+            )
+            rag_bits = (
+                ke.get_routing_context(message, n_results=8) or ""
+            ).strip()
+        else:
+            # Avoid stuffing unrelated RAG when continuing a new project-idea thread
+            if not thread_note:
+                rag_bits = (ke.get_routing_context(message, n_results=4) or "").strip()
         try:
             memory_bits = (ke._memory.get_full_summary(  # noqa: SLF001
-                ke.get_active_project_name() or ""
+                mentioned or ke.get_active_project_name() or ""
             ) or "").strip()
         except Exception:
             memory_bits = ""
     except Exception:
         pass
 
+    known = ", ".join(known_project_names()[:24])
     system = (
         "You are Immortility, Reyansh's desktop AI running locally. "
         f"Your codebase root is `{root}`. "
         f"RAG lives in `{root / 'rag'}`, orchestration in `{root / 'knowledge'}`, "
-        f"Chroma DB in `{root / '.vector_db'}`. "
+        f"TurboVec DB in `{root / '.vector_db'}`. "
         "Backend actions run in the Immortility terminal. "
-        "You CAN read local files via the action/self-inspect systems. "
+        "You CAN read local files and index Desktop projects into TurboVec via the HUD. "
+        "You CAN open sites and searches in Reyansh's Chrome (YouTube, Google, Netflix, etc.). "
+        "Never say you cannot open YouTube or the browser — the HUD does that for real. "
+        "When he names a Desktop project (e.g. 'stocks app' = stocks_app), treat it as "
+        "THAT codebase — summarize from retrieved local context, never invent a generic app. "
+        f"Known projects: {known}. "
+        "Conversation continuity is critical: if he refers to 'the project', 'it', 'this', "
+        "or asks how to start something you already discussed in this chat, CONTINUE that "
+        "same idea with concrete next steps. Do not web-search. Do not invent a list of "
+        "Medium articles. Prefer the plan already in the chat history / ongoing topic. "
+        "If he asks to index/read projects and it wasn't done yet, tell him to say "
+        "'index my desktop projects' or `/open <path>` — the HUD runs real ingest. "
         "Never say you cannot access files or invent Microsoft/Medium web links "
         "when asked about YOUR vector DB / RAG / knowledge folder. "
-        "Be brief. Address him as Reyansh. "
-        "For voice, keep answers short unless he asks for detail."
+        "Address him as Reyansh. For voice, keep answers shorter. "
+        f"{REPLY_FORMAT_RULES}"
     )
+    if thread_note:
+        system += f"\n\n{thread_note}"
+    if project_note:
+        system += f"\n\n{project_note}"
     if memory_bits:
         system += f"\n\nMemory pack:\n{memory_bits[:1600]}"
-    if rag_bits:
-        system += f"\n\nRetrieved local code context:\n{rag_bits[:2500]}"
+    if rag_bits and not thread_note:
+        system += f"\n\nRetrieved local code context:\n{rag_bits[:3500]}"
+    elif mentioned:
+        system += (
+            f"\n\nNo code snippets retrieved for `{mentioned}` — say you need a "
+            f"re-index rather than inventing features."
+        )
 
-    return fast_chat(
+    hist = history_for_model(history, max_turns=16)
+    reply = fast_chat(
         message,
-        history=history or [],
+        history=hist,
         system=system,
-        max_output_tokens=320,
+        max_output_tokens=520,
     )
+    try:
+        update_focus_after_turn(message, reply, hist)
+    except Exception:
+        pass
+    return reply

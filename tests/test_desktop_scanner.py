@@ -45,6 +45,11 @@ def test_wants_projects_scan_phrases():
     assert not wants_projects_scan("write it in python and create a new file in desktop")
     assert not wants_projects_scan("3664. Two-Letter Card Game solve this leetcode")
     assert not wants_projects_scan("save the solution to desktop as a python file")
+    # Index / deep-read must NOT become a listing
+    assert not wants_projects_scan("index projects in my desktop yourself and read")
+    assert not wants_projects_scan("read the projects")
+    assert not wants_projects_scan(r"/open C:\Users\reyan\OneDrive\Desktop\Projects")
+    assert not wants_projects_scan("ingest all projects on desktop")
 
 
 def test_format_projects_report_lists_all():

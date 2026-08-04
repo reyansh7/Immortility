@@ -65,6 +65,170 @@ def summarize_folder(path: Path, max_entries: int = 24) -> str:
     return "; ".join(bits) if bits else "(empty)"
 
 
+_WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s\"']+")
+
+
+def _norm_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _desktop_and_projects_dirs() -> tuple[list[Path], list[Path]]:
+    """Return (Desktop top-level dirs except Projects, Desktop/Projects children)."""
+    desktop = get_desktop_path()
+    top: list[Path] = []
+    if desktop.is_dir():
+        for p in desktop.iterdir():
+            if not p.is_dir():
+                continue
+            if p.name.lower() in _SKIP_DESKTOP or p.name.lower() == "projects":
+                continue
+            top.append(p)
+    proj_root = projects_dir()
+    proj_children: list[Path] = []
+    if proj_root.is_dir():
+        for p in proj_root.iterdir():
+            if p.is_dir() and not p.name.startswith("."):
+                proj_children.append(p)
+    return sorted(top, key=lambda p: p.name.lower()), sorted(
+        proj_children, key=lambda p: p.name.lower()
+    )
+
+
+def _resolve_folder_by_name(name: str) -> Path | None:
+    n = _norm_name(name)
+    if not n:
+        return None
+    top, proj_children = _desktop_and_projects_dirs()
+    all_dirs = top + proj_children
+    # Exact normalized match first
+    for p in all_dirs:
+        if _norm_name(p.name) == n:
+            return p.resolve()
+    # Containment fallback (e.g. "algo verse" -> AlgoVerse)
+    for p in all_dirs:
+        pn = _norm_name(p.name)
+        if n in pn or pn in n:
+            return p.resolve()
+    return None
+
+
+def resolve_scan_target(query: str) -> Path | None:
+    """Resolve a user query to a concrete folder path for deterministic scan output."""
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    # Explicit absolute Windows path in message wins
+    for m in _WIN_PATH_RE.finditer(q):
+        p = Path(m.group(0))
+        if p.is_dir():
+            return p.resolve()
+
+    low = q.lower()
+    top, proj_children = _desktop_and_projects_dirs()
+
+    # Try to extract "analyze/scan/open <name>"
+    m = re.search(
+        r"\b(?:scan|analy[sz]e|tell me about|about|open|inspect|review)\s+([a-z0-9._\- ]{2,80})\b",
+        low,
+    )
+    if m:
+        cand = m.group(1)
+        cand = re.sub(
+            r"\b(on|in)\s+(my\s+)?desktop\b.*$", "", cand, flags=re.IGNORECASE
+        )
+        cand = re.sub(
+            r"\b(folder|project|codebase|repo)\b", "", cand, flags=re.IGNORECASE
+        ).strip()
+        p = _resolve_folder_by_name(cand)
+        if p is not None:
+            return p
+
+    # Fallback: any known folder token appearing in query
+    for p in proj_children + top:
+        if _norm_name(p.name) and _norm_name(p.name) in _norm_name(low):
+            return p.resolve()
+
+    # "scan number 2" support. Use only when we couldn't infer a concrete name.
+    num = re.search(r"\b(?:number|no\.?|#)\s*(\d{1,3})\b", low)
+    if num:
+        idx = int(num.group(1))
+        pool: list[Path] = []
+        if "desktop" in low and "project" not in low:
+            pool = top
+        elif "project" in low:
+            pool = proj_children
+        else:
+            # If ambiguous, use combined stable order: Projects then Desktop top.
+            pool = proj_children + top
+        if 1 <= idx <= len(pool):
+            return pool[idx - 1].resolve()
+
+    return None
+
+
+def format_single_folder_report(path: Path) -> str:
+    """Deterministic folder report from live filesystem only (no inference)."""
+    p = path.resolve()
+    if not p.is_dir():
+        return f"Folder not found: `{p}`"
+
+    kids = list(p.iterdir())
+    dirs = sorted([k.name for k in kids if k.is_dir()], key=str.lower)
+    files = sorted([k.name for k in kids if k.is_file()], key=str.lower)
+    total_files = len(files)
+    total_dirs = len(dirs)
+    show_dirs = dirs[:16]
+    show_files = files[:20]
+
+    markers: list[str] = []
+    if (p / "package.json").is_file():
+        markers.append("Node/JavaScript project")
+    if (p / "requirements.txt").is_file() or (p / "pyproject.toml").is_file():
+        markers.append("Python project")
+    if (p / ".git").is_dir():
+        markers.append("git repo")
+    if (p / "README.md").is_file():
+        markers.append("README present")
+    if (p / "data").is_dir() or (p / "dataset").is_dir():
+        markers.append("has data folder")
+
+    lines = [
+        f"Folder: `{p.name}`",
+        f"Path: `{p}`",
+        f"Items: {len(kids)} total ({total_dirs} folders, {total_files} files).",
+        "",
+    ]
+    if markers:
+        lines.append(
+            "Quick signal: " + ", ".join(markers) + "."
+        )
+        lines.append("")
+
+    lines.append("Top-level folders:")
+    if show_dirs:
+        for d in show_dirs:
+            lines.append(f"- {d}")
+        if total_dirs > len(show_dirs):
+            lines.append(f"- +{total_dirs - len(show_dirs)} more")
+    else:
+        lines.append("- (none)")
+    lines.append("")
+    lines.append("Top-level files:")
+    if show_files:
+        for f in show_files:
+            lines.append(f"- {f}")
+        if total_files > len(show_files):
+            lines.append(f"- +{total_files - len(show_files)} more")
+    else:
+        lines.append("- (none)")
+    lines.append("")
+    lines.append(
+        "This summary is from a live filesystem scan of this folder only; no guessed files."
+    )
+    return "\n".join(lines)
+
+
 def build_projects_fact_block(*, include_desktop: bool = True, deep: bool = False) -> str:
     """Ground-truth text the model MUST treat as authoritative."""
     desktop = get_desktop_path()
@@ -142,6 +306,18 @@ def wants_projects_scan(query: str) -> bool:
     q = (query or "").strip()
     if not q:
         return False
+    # Index / open / deep-read intents must NEVER become a folder listing
+    try:
+        from tools.hud_knowledge import wants_index_or_ingest
+
+        if wants_index_or_ingest(q):
+            return False
+    except Exception:
+        pass
+    if q.lower().startswith("/open"):
+        return False
+    if re.search(r"\b(index|ingest|reindex|re-index|embed)\b", q, re.I):
+        return False
     # Coding / LeetCode / "write file on desktop" / "create folder" is NOT a listing
     if _CODE_OR_FILE_INTENT.search(q):
         return False
@@ -151,11 +327,18 @@ def wants_projects_scan(query: str) -> bool:
         if not any(w in low for w in ("list", "show", "what", "scan", "how many", "analy")):
             return False
     if _PROJECTS_QUERY.search(q):
+        # Still block if they asked to index/read deeply (belt-and-suspenders)
+        if re.search(r"\b(index|ingest|read|understand|learn)\b", low):
+            return False
         return True
     low = q.lower().replace("\\", "/")
     if "desktop/projects" in low or "desktop\\projects" in query.lower():
+        if re.search(r"\b(index|ingest|/open|read|understand)\b", low):
+            return False
         return True
     if "folder" in low and ("project" in low or "projects" in low):
+        if re.search(r"\b(index|ingest|read|understand)\b", low):
+            return False
         return True
     if "many other" in low or "not just" in low:
         return True
@@ -163,8 +346,12 @@ def wants_projects_scan(query: str) -> bool:
     if "project" in low and "desktop" in low and any(
         w in low for w in ("list", "analy", "show", "what", "scan", "all")
     ):
+        if re.search(r"\b(index|ingest|read|understand|learn)\b", low):
+            return False
         return True
     if "analy" in low and "project" in low:
+        if re.search(r"\b(index|ingest)\b", low):
+            return False
         return True
     return False
 
