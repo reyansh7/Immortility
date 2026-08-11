@@ -167,5 +167,16 @@ class ResearchAgent:
             summary=f"Research gathered from {len(results)} search results.",
         )
         self.state.set_research_context(ctx)
+        # Persist into TurboVec so later chats can retrieve this knowledge
+        try:
+            from knowledge.learner import remember_web_research
+
+            remember_web_research(
+                query,
+                ctx.extracted_text[:6000] or ctx.summary,
+                sources=list(ctx.sources or []),
+            )
+        except Exception:
+            pass
         console.print(f"[green]Research complete.[/green] {len(ctx.extracted_text)} chars collected.")
         return ctx

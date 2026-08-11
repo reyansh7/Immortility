@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from core.workflow_state import WorkflowStep
 
+
+def _max_retries() -> int:
+    try:
+        from core.config import get_config
+
+        return get_config().decision_max_retries
+    except Exception:
+        return 3
+
+
+# Kept for import compatibility; prefer _max_retries() at call sites
 MAX_RETRIES = 3
 
 # Linear pipeline with debugger loop on verification failure
@@ -28,7 +39,7 @@ class DecisionEngine:
         retry_count: int = 0,
     ) -> WorkflowStep | None:
         if not success:
-            if retry_count + 1 >= MAX_RETRIES:
+            if retry_count + 1 >= _max_retries():
                 return None
             if current in (
                 WorkflowStep.VERIFIER,

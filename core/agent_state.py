@@ -5,7 +5,16 @@ from pathlib import Path
 from core.research_context import ResearchContext
 from core.repo_paths import state_file_path
 
-MAX_HISTORY = 30
+
+def _max_history() -> int:
+    try:
+        from core.config import get_config
+
+        return get_config().max_history
+    except Exception:
+        return 30
+
+
 _SAVE_LOCK = threading.RLock()
 
 
@@ -69,6 +78,11 @@ class AgentState:
             except (json.JSONDecodeError, OSError):
                 pass
 
+    def reload(self) -> None:
+        """Re-read state.json from disk (HUD / multi-process freshness)."""
+        with _SAVE_LOCK:
+            self._load()
+
     def get_research_context(self) -> ResearchContext | None:
         if isinstance(self.research_context, dict):
             return ResearchContext.from_dict(self.research_context)
@@ -90,8 +104,9 @@ class AgentState:
             if step in ("Executing", "Coding", "Planning", "Researching") or workflow == "leetcode":
                 self.current_task = None
 
-        if len(self.conversation_history) > MAX_HISTORY:
-            self.conversation_history = self.conversation_history[-MAX_HISTORY:]
+        max_h = _max_history()
+        if len(self.conversation_history) > max_h:
+            self.conversation_history = self.conversation_history[-max_h:]
 
         self.save()
 
@@ -100,11 +115,28 @@ class AgentState:
         self.save()
 
     def append_message(self, role: str, content: str) -> None:
+        max_h = _max_history()
         with _SAVE_LOCK:
             self.conversation_history.append({"role": role, "content": content})
-            if len(self.conversation_history) > MAX_HISTORY:
-                self.conversation_history = self.conversation_history[-MAX_HISTORY:]
-        self.save()
+            if len(self.conversation_history) > max_h:
+                self.conversation_history = self.conversation_history[-max_h:]
+            # Persist under the same lock acquisition (BUG-9)
+            data = {
+                "mode": self.mode,
+                "pending_action": self.pending_action,
+                "current_task": self.current_task,
+                "active_project": self.active_project,
+                "conversation_history": self.conversation_history,
+                "research_context": self.research_context,
+                "browser_state": self.browser_state,
+                "pending_coding_request": self.pending_coding_request,
+                "chat_focus": self.chat_focus,
+            }
+            path = self.state_path
+            tmp = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            tmp.replace(path)
 
     def save(self) -> None:
         data = {

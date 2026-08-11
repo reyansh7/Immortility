@@ -69,6 +69,15 @@ DANGEROUS_COMMAND_PATTERNS = (
     "format ",
     "rmdir",
     "rd ",
+    "sudo ",
+    "chmod ",
+    "chown ",
+    "shutdown",
+    "reboot",
+    "mkfs",
+    "dd if=",
+    "reg delete",
+    "Remove-Item",
 )
 
 
@@ -115,10 +124,7 @@ def format_confirmation_message(tool_name: str, args: dict) -> str:
         return f"I am about to delete:\n{args.get('path')}\nProceed? (yes/no)"
     if tool_name == "run_command":
         return f"I am about to run this command:\n{args.get('cmd')}\nProceed? (yes/no)"
-    if tool_name == "open_url":
-        return f"I am about to open:\n{args.get('url')}\nProceed? (yes/no)"
-    if tool_name == "search_google":
-        return f"I am about to search for:\n{args.get('query')}\nProceed? (yes/no)"
+    # open_url / search_google are DIRECT_BROWSER_TOOLS (no confirmation) — omit here
     if tool_name == "open_application":
         return f"I am about to open application:\n{args.get('name', args.get('app', 'unknown'))}\nProceed? (yes/no)"
     if tool_name == "kill_process":

@@ -12,7 +12,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PROJECTS_FILE = "memory/data/projects.json"
+
+def _default_projects_path() -> Path:
+    try:
+        from core.repo_paths import projects_memory_path
+
+        return projects_memory_path()
+    except Exception:
+        return Path("memory/data/projects.json")
+
+
+PROJECTS_FILE = str(_default_projects_path())
 
 
 class ProjectMemory:
@@ -24,8 +34,8 @@ class ProjectMemory:
     - Dependencies
     """
 
-    def __init__(self, filepath: str = PROJECTS_FILE) -> None:
-        self._path = Path(filepath)
+    def __init__(self, filepath: str | Path | None = None) -> None:
+        self._path = Path(filepath) if filepath else _default_projects_path()
         self._projects: dict[str, dict[str, Any]] = {}
         self._load()
 

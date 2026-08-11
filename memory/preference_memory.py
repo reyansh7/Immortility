@@ -12,7 +12,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PREFERENCES_FILE = "memory/data/preferences.json"
+
+def _default_preferences_path() -> Path:
+    try:
+        from core.repo_paths import preferences_path
+
+        return preferences_path()
+    except Exception:
+        return Path("memory/data/preferences.json")
+
+
+PREFERENCES_FILE = str(_default_preferences_path())
 
 
 class PreferenceMemory:
@@ -24,8 +34,8 @@ class PreferenceMemory:
     - Custom user-defined preferences
     """
 
-    def __init__(self, filepath: str = PREFERENCES_FILE) -> None:
-        self._path = Path(filepath)
+    def __init__(self, filepath: str | Path | None = None) -> None:
+        self._path = Path(filepath) if filepath else _default_preferences_path()
         self._prefs: dict[str, Any] = {}
         self._load()
 

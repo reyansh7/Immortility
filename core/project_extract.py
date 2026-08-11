@@ -95,8 +95,6 @@ def is_run_project_request(text: str) -> bool:
         "start project",
         "launch the project",
         "launch project",
-        "run skilllens",
-        "start skilllens",
         "run frontend",
         "run backend",
         "start frontend",

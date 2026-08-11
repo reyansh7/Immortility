@@ -61,3 +61,19 @@ def test_format_projects_report_lists_all():
     for name in folders:
         assert name in report
     assert "Resume Analyzer" not in report or "Resume_Analyzer" in report
+
+
+def test_answer_existence_query_is_concise():
+    from core.desktop_scanner import answer_desktop_projects_query
+
+    reply = answer_desktop_projects_query(
+        "analyze desktop and tell me if any projects are there",
+        learn=False,
+    )
+    assert "Desktop/Projects — live scan" not in reply
+    assert "dirs:" not in reply.lower()
+    low = reply.lower()
+    assert "yes" in low or "project" in low or "folder" in low
+    # Should not dump every file tree
+    assert "node_modules" not in low
+    assert len(reply) < 900

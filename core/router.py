@@ -6,6 +6,7 @@ from core.llm import chat
 VALID_CATEGORIES = ("RESEARCH_TASK", "ACTION", "TASK", "CHAT", "PROJECT")
 
 
+from core.intent import is_coding_intent
 from core.project_extract import is_run_project_request
 
 
@@ -14,19 +15,26 @@ def _fast_route(user_input: str) -> str | None:
     lower = user_input.strip().lower()
     if lower in ("hi", "hello", "hey", "thanks", "thank you"):
         return "CHAT"
-    if lower in ("yes", "y", "ok", "proceed", "continue", "confirm"):
-        return "PROJECT"
+
+    # Bare approvals are NOT PROJECT unless something is pending
+    if lower in ("yes", "y", "ok", "okay", "proceed", "continue", "confirm"):
+        try:
+            from core.agent_state import AgentState
+
+            state = AgentState()
+            if state.pending_coding_request or state.pending_action:
+                return "PROJECT"
+        except Exception:
+            pass
+        return "CHAT"
+
     if is_run_project_request(user_input):
         return "PROJECT"
     if lower.startswith("/open") or "open my project" in lower or "open project" in lower:
         return "PROJECT"
     if lower.startswith("where is") or lower.startswith("find ") or "explain my" in lower:
         return "PROJECT"
-    if any(kw in lower for kw in (
-        "implement", "fix ", "refactor", "rename", "jwt", "make the changes",
-        "debug", "error", "create file", "create component", "build project", "add ", "login", "navbar",
-        "authentication", "make these changes", "404",
-    )):
+    if is_coding_intent(user_input):
         return "PROJECT"
     if lower.startswith("open ") and "http" not in lower:
         return "ACTION"

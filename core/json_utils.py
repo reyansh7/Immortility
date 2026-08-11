@@ -11,20 +11,33 @@ def strip_think_blocks(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL)
 
 
+_FENCE_RE = re.compile(
+    r"```(?:json|JSON)?\s*\n?(.*?)```",
+    re.DOTALL,
+)
+
+
 def strip_llm_fences(text: str) -> str:
-    """Remove <think> blocks and ```json / ``` fences; return inner text."""
+    """Remove <think> blocks and fenced code; prefer the last JSON-looking fence."""
     content = strip_think_blocks(text).strip()
-    if "```json" in content:
-        content = content.split("```json")[-1].split("```")[0].strip()
-    elif "```" in content:
+    matches = list(_FENCE_RE.finditer(content))
+    if matches:
+        # Prefer last fence that looks like JSON object/array
+        for m in reversed(matches):
+            inner = m.group(1).strip()
+            if inner.startswith("{") or inner.startswith("["):
+                return inner
+        return matches[-1].group(1).strip()
+    # Fallback: bare ``` without language
+    if "```" in content:
         parts = content.split("```")
         if len(parts) >= 2:
-            content = parts[1].split("```")[0].strip()
-            # drop optional language tag on first line
-            if "\n" in content:
-                first, rest = content.split("\n", 1)
+            chunk = parts[1].strip()
+            if "\n" in chunk:
+                first, rest = chunk.split("\n", 1)
                 if first.strip().isalpha() and len(first.strip()) < 12:
-                    content = rest.strip()
+                    chunk = rest.strip()
+            return chunk
     return content.strip()
 
 

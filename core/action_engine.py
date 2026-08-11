@@ -119,10 +119,25 @@ async def agent_step(
 
 def _load_system_prompt() -> str:
     try:
-        with open("prompts/system.txt", "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return "You are Immortility, a helpful local AI assistant."
+        from core.config import load_prompt_file
+        from core.repo_paths import get_repo_root
+
+        try:
+            from memory.user_profile import get_user_name
+
+            user_name = get_user_name()
+        except Exception:
+            user_name = "there"
+        text = load_prompt_file(
+            "system.txt",
+            user_name=user_name,
+            repo_root=str(get_repo_root()),
+        )
+        if text.strip():
+            return text
+    except Exception:
+        pass
+    return "You are Immortility, a helpful local AI assistant."
 
 
 async def _run_verification_gate(
@@ -236,7 +251,9 @@ async def execute_action(
 
     project_root = ""
     try:
+        # KnowledgeEngine is a process-wide singleton — same instance as CLI `_get_engine()`
         from knowledge.engine import KnowledgeEngine
+
         active = KnowledgeEngine().get_active_project()
         if active and active.path:
             project_root = active.path
@@ -259,50 +276,54 @@ async def execute_action(
         else f"{desktop}\\example.py"
     )
 
-    tool_prompt = f"""
-{registry.get_tool_prompt()}
+    from core.config import get_config, load_prompt_file
+    from core.framework_hints import get_framework_hints
+    from core.repo_paths import get_repo_root
 
-You are the Action Engine for Immortility. {"Execute real filesystem changes." if require_edits else "Investigate and answer — do NOT invent edits unless the user asked to fix/change code."}
-
-RULES:
-1. Read before edit — call read_file before any edit tool on the same file.
-2. NEW files only → create_file. Existing files → edit_file, insert_after, replace_lines, write_file.
-3. ALL paths must be absolute. Project root: {project_root or desktop}
-4. read_file returns raw text in "content" and line numbers in "numbered" — use "content" for target_text, "numbered" for replace_lines.
-5. For .tsx/.jsx files: prefer write_file with the FULL corrected file if edit_file fails twice.
-6. {"NEVER call DONE until all required edits are applied AND verified with read_file." if require_edits else "For analysis / bug-hunt / review / explain requests: gather enough evidence with read_file/list_directory (or tree), then call DONE with a clear Markdown report in args.message. Do NOT edit files. Do NOT keep reading forever — max ~8 reads then DONE."}
-7. Respond with ONE JSON object per turn: tool, reason, confidence, args.
-8. NEVER use search_google or open_url for local file paths.
-8b. Immortility's OWN codebase is at the Immortility project root (sibling of core/, rag/, knowledge/). When the user asks about YOUR vector database, RAG, knowledge folder, or where RAG code lives: use list_directory/read_file on those local folders (rag/, knowledge/, .vector_db/). Do NOT web-search "vector database". There is no rag_code.py — RAG is the rag/ package (vector_store.py, retriever.py, indexer.py, etc.).
-8c. Destructive tools need user confirmation in HUD — do not assume auto-approve.
-9. If read_file returns "No such file or directory", the file does not exist. You MUST use create_file to create it (only if the user asked to create/fix something).
-10. To list installed software or games on Windows, use run_command with this EXACT command (do not modify dollar signs):
-powershell -NoProfile -Command "[Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8; Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' | Where-Object {{ $_.DisplayName }} | Select-Object -ExpandProperty DisplayName | Sort-Object -Unique"
-Filter game names from the list in your DONE message. Do NOT repeat the command if it already succeeded.
-11. When asked to retrieve, list, or read information, your final DONE message MUST contain the ACTUAL data/list beautifully formatted in Markdown. Do NOT just say "I listed the files" — actually provide the list to the user!
-12. If asked to run/start the project, use run_command to launch the dev servers (e.g. npm run dev, uvicorn, python). It will return RUNNING. You MUST include the localhost URLs (e.g. http://localhost:3000) in your final DONE message so the user can click them.
-13. If asked to read, list, or scan an "entire folder" or project recursively, DO NOT use list_directory in a loop! Use run_command with: powershell -Command "tree /F '<path>'" to get the entire folder structure instantly.
-14. If verification repeatedly fails, you may return {{"tool":"DONE","reason":"fallback","confidence":1.0,"request_fallback":true,"args":{{"message":"need stronger model"}}}} only after at least two failed verification attempts.
-15. Use this read-only retrieved context before tool calls:
-{context_override[:5000] if context_override else "No extra retrieved context provided."}
-16. To open a project folder in VS Code, use run_command: code "C:\\full\\path\\to\\folder" — never shell-execute a directory path alone.
-17. globals.css in Next.js App Router is usually under src/app/globals.css (not src/globals.css).
-
-Example read:
-{{"tool": "read_file", "reason": "read before edit", "confidence": 1.0, "args": {{"path": "{example_path}"}}}}
-
-Example insert:
-{{"tool": "insert_after", "reason": "add import", "confidence": 0.95, "args": {{"path": "{example_path}", "target_text": "exact line from content field", "content": "new line"}}}}
-
-Example write full file (use when small file or edit_file keeps failing):
-{{"tool": "write_file", "reason": "rewrite file", "confidence": 0.9, "args": {{"path": "{example_path}", "content": "full file text"}}}}
-
-Example done:
-{{"tool": "DONE", "reason": "{"verified changes" if require_edits else "analysis complete"}", "confidence": 1.0, "args": {{"message": "{"summary of what changed" if require_edits else "Markdown findings / bug report"}"}}}}
-"""
+    cfg = get_config()
+    edit_mode_line = (
+        "Execute real filesystem changes."
+        if require_edits
+        else "Investigate and answer — do NOT invent edits unless the user asked to fix/change code."
+    )
+    done_rule = (
+        "NEVER call DONE until all required edits are applied AND verified with read_file."
+        if require_edits
+        else (
+            "For analysis / bug-hunt / review / explain requests: gather enough evidence with "
+            "read_file/list_directory (or tree), then call DONE with a clear Markdown report in "
+            "args.message. Do NOT edit files. Do NOT keep reading forever — max ~8 reads then DONE."
+        )
+    )
+    tool_body = load_prompt_file(
+        "tool_system.txt",
+        edit_mode_line=edit_mode_line,
+        project_root=project_root or desktop,
+        done_rule=done_rule,
+        repo_root=str(get_repo_root()),
+        context_override=(
+            context_override[:5000]
+            if context_override
+            else "No extra retrieved context provided."
+        ),
+        framework_hints=get_framework_hints(project_root) or "- (none detected)",
+        example_path=example_path,
+        done_reason="verified changes" if require_edits else "analysis complete",
+        done_message_hint=(
+            "summary of what changed" if require_edits else "Markdown findings / bug report"
+        ),
+    )
+    if not tool_body.strip():
+        tool_body = (
+            f"{edit_mode_line}\nProject root: {project_root or desktop}\n"
+            f"{done_rule}\nRespond with ONE JSON tool call per turn."
+        )
+    tool_prompt = f"{registry.get_tool_prompt()}\n\n{tool_body}"
 
     console.print("\n[bold magenta]--- Action Engine ---[/bold magenta]")
-    max_steps = 10 if not require_edits else 20
+    max_steps = (
+        cfg.action_max_steps_readonly if not require_edits else cfg.action_max_steps_edit
+    )
     files_read: set[str] = set()
     read_counts: dict[str, int] = {}
     tools_executed: set[str] = set(tools_executed_init or [])
@@ -339,8 +360,18 @@ Example done:
                 "I inspected the folder but couldn't finish a structured report. "
                 "Try asking about one specific file (e.g. `rag/indexer.py`)."
             )
+        try:
+            from memory.user_profile import get_user_name
+
+            who = get_user_name()
+        except Exception:
+            who = "the user"
+        try:
+            summary_tokens = get_config().action_summary_max_tokens
+        except Exception:
+            summary_tokens = 700
         prompt = (
-            "You analyzed a codebase via tools. Write a clear Markdown report for Reyansh.\n"
+            f"You analyzed a codebase via tools. Write a clear Markdown report for {who}.\n"
             f"Original request: {user_input or '(analysis)'}\n"
             f"Stop reason: {reason}\n\n"
             "Tool evidence:\n"
@@ -360,7 +391,7 @@ Example done:
                     {"role": "user", "content": prompt},
                 ],
                 think=False,
-                max_output_tokens=700,
+                max_output_tokens=summary_tokens,
                 temperature=0.3,
             )
             summary = (response.get("message") or {}).get("content") or ""
@@ -657,8 +688,6 @@ def is_page_query(text: str) -> bool:
 
 
 def is_coding_request(text: str) -> bool:
-    lower = text.lower()
-    return any(kw in lower for kw in (
-        "implement", "fix", "refactor", "rename", "add ", "update file", "convert",
-        "create file", "create component", "jwt", "authentication", "make the changes", "edit file", "modify file",
-    ))
+    from core.intent import is_coding_intent
+
+    return is_coding_intent(text)

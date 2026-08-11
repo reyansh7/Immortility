@@ -338,6 +338,34 @@ class KnowledgeEngine:
 
         return results[:n_results]
 
+    def get_learned_context(self, query: str, n_results: int = 4) -> str:
+        """Retrieve self-learned notes / web research / desktop inventory from docs store."""
+        q = (query or "").strip()
+        if not q:
+            return ""
+        try:
+            emb = self._embedding_model.encode_query(q)
+            hits = self._docs_store.search(emb, n_results=n_results)
+        except Exception as exc:
+            logger.debug("learned-context search failed: %s", exc)
+            return ""
+        lines: list[str] = []
+        for h in hits or []:
+            doc = ""
+            meta: dict = {}
+            if isinstance(h, dict):
+                doc = str(h.get("document") or h.get("content") or "")
+                meta = h.get("metadata") or {}
+            else:
+                doc = str(getattr(h, "document", "") or getattr(h, "content", "") or "")
+                meta = getattr(h, "metadata", None) or {}
+            snippet = doc.strip().replace("\n", " ")
+            if not snippet:
+                continue
+            kind = meta.get("kind") or meta.get("source") or "learned"
+            lines.append(f"[learned:{kind}] {snippet[:280]}")
+        return "\n".join(lines[:n_results])
+
     def get_routing_context(self, query: str, n_results: int = 6) -> str:
         hits = self.get_hybrid_results(query, n_results=n_results)
         lines = []
@@ -345,7 +373,10 @@ class KnowledgeEngine:
             snippet = (h.content or "").strip().replace("\n", " ")
             lines.append(f"{h.filename}:{h.start_line}-{h.end_line} :: {snippet[:220]}")
         graph = self.query_codebase_graph(query)
+        learned = self.get_learned_context(query, n_results=3)
         payload = "\n".join(lines[:n_results])
+        if learned:
+            payload = f"{payload}\n\nLearned memory:\n{learned}"
         if graph:
             payload = f"{payload}\n\nGraph:\n{graph}"
         self._log_event("routing_retrieval", query, payload)
@@ -371,6 +402,9 @@ class KnowledgeEngine:
         if two_hop:
             parts.append(f"Graph two-hop callers/callees for {multi_hop_query}:\n{two_hop}")
         payload = "\n\n".join(parts)
+        learned = self.get_learned_context(query, n_results=3)
+        if learned:
+            payload = f"{payload}\n\nLearned memory:\n{learned}"
         self._log_event("action_retrieval", query, payload)
         return payload[:9000]
 
@@ -646,6 +680,20 @@ class KnowledgeEngine:
                 for r in report.projects
             ],
         }
+
+    # ── Self-learning ─────────────────────────────────────────────────
+
+    def learn_note(
+        self,
+        text: str,
+        *,
+        source: str = "manual",
+        kind: str = "note",
+    ) -> dict[str, Any]:
+        """Store a free-form note into the documentation TurboVec collection."""
+        from knowledge.learner import remember_text
+
+        return remember_text(text, source=source, kind=kind)
 
     # ── Stats ───────────────────────────────────────────────────────
 

@@ -522,20 +522,63 @@ def handle_hud_request(
     if one_scan:
         return (multi_prefix + one_scan).strip()
 
-    # Desktop / projects listing
+    # Desktop / projects listing — natural answer + learn into TurboVec
     try:
         from core.desktop_scanner import (
-            format_projects_report,
+            answer_desktop_projects_query,
             wants_projects_scan,
         )
 
         if wants_projects_scan(message):
-            return (multi_prefix + format_projects_report(
-                deep="analy" in message.lower(),
-                include_desktop="desktop" in message.lower() or "all" in message.lower(),
-            )).strip()
+            return (multi_prefix + answer_desktop_projects_query(message, learn=True)).strip()
     except Exception:
         pass
+
+    # Explicit web research / learn-from-web → search + store in TurboVec
+    if re.search(
+        r"\b(research|look up|search the web|learn about|find online|google)\b",
+        message,
+        re.I,
+    ) and not re.search(r"\b(youtube|netflix|open\s+chrome)\b", message, re.I):
+        try:
+            from agents.research_agent import ResearchAgent
+            from core.llm import fast_chat
+            from core.reply_format import polish_reply
+
+            def _run_research() -> str:
+                import asyncio
+
+                async def _go() -> str:
+                    ctx = await ResearchAgent().execute(message)
+                    summary = fast_chat(
+                        message,
+                        extra_context=(
+                            "Web research notes (use these facts; cite sources briefly):\n"
+                            f"{(ctx.summary or '')}\n"
+                            f"{(ctx.extracted_text or '')[:3500]}\n"
+                            f"Sources: {', '.join(ctx.sources or [])}"
+                        ),
+                        max_output_tokens=320,
+                    )
+                    return polish_reply(summary) or (ctx.summary or "Research finished.")
+
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    # HUD often already inside an event loop
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        return pool.submit(lambda: asyncio.run(_go())).result(timeout=180)
+                return asyncio.run(_go())
+
+            return (multi_prefix + _run_research()).strip()
+        except Exception as exc:
+            logger.exception("HUD web research failed")
+            return f"Web research failed: {exc}"
+
 
     # Index Immortility into local TurboVec (store code for RAG)
     low_msg = message.lower().strip()

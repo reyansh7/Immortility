@@ -29,7 +29,14 @@ console = Console()
 class WorkflowEngine:
     """Orchestrates autonomous software engineering workflows."""
 
-    def __init__(self, db_path: str = "workflow.db") -> None:
+    def __init__(self, db_path: str | None = None) -> None:
+        if db_path is None:
+            try:
+                from core.repo_paths import workflow_db_path
+
+                db_path = str(workflow_db_path())
+            except Exception:
+                db_path = "workflow.db"
         self.state = WorkflowState(db_path=db_path)
         self.history = WorkflowHistory(db_path=db_path)
         self.scheduler = WorkflowScheduler(self.state)

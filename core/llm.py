@@ -24,7 +24,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from core.reply_format import REPLY_FORMAT_RULES, polish_reply
+from core.reply_format import polish_reply
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +107,14 @@ def _provider() -> str:
 
 def _gemini_model() -> str:
     _load_dotenv()
-    return (os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash").strip()
+    try:
+        from core.config import get_config
+
+        fallbacks = get_config().gemini_fallback_models
+        default = fallbacks[0] if fallbacks else "gemini-2.0-flash"
+    except Exception:
+        default = "gemini-2.0-flash"
+    return (os.environ.get("GEMINI_MODEL") or default).strip()
 
 
 def _gemini_client_cached():
@@ -222,7 +229,13 @@ def _openai_client(base_url: str, api_key: str):
             raise RuntimeError(
                 "openai package required for local LLM. pip install openai"
             ) from exc
-        client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
+        try:
+            from core.config import get_config
+
+            timeout = float(get_config().openai_timeout_seconds)
+        except Exception:
+            timeout = 120.0
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         _openai_clients[key] = client
         return client
 
@@ -356,11 +369,20 @@ def _chat_ollama_native(
     if max_output_tokens is not None and int(max_output_tokens) > 0:
         options["num_predict"] = int(max_output_tokens)
 
+    try:
+        from core.config import get_config
+
+        think_flag = bool(get_config().ollama_think)
+        http_timeout = float(get_config().openai_timeout_seconds)
+    except Exception:
+        think_flag = False
+        http_timeout = 120.0
+
     payload = {
         "model": tag,
         "messages": _normalize_openai_messages(messages),
         "stream": False,
-        "think": False,
+        "think": think_flag,
         "options": options,
     }
     data = json.dumps(payload).encode("utf-8")
@@ -371,7 +393,7 @@ def _chat_ollama_native(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=http_timeout) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.URLError as exc:
         raise RuntimeError(
@@ -565,8 +587,14 @@ def chat(
             quota_hit = "429" in err_l or "resource_exhausted" in err_l or "quota" in err_l
             if not quota_hit:
                 current = _gemini_model()
-                alt = "gemini-2.0-flash" if "lite" in current else "gemini-2.0-flash-lite"
-                if alt != current:
+                try:
+                    from core.config import get_config
+
+                    alts = list(get_config().gemini_fallback_models)
+                except Exception:
+                    alts = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+                alt = next((a for a in alts if a != current), None)
+                if alt:
                     try:
                         logger.warning("Gemini %s failed (%s); retry %s", current, exc, alt)
                         return _chat_gemini(
@@ -613,18 +641,28 @@ def chat(
     )
 
 
-_FAST_SYSTEM = (
-    "You are Immortility, Reyansh's desktop AI assistant. "
-    "Be warm, capable, and concise. "
-    "You can open sites/apps, search YouTube/Google in his Chrome, "
-    "list Desktop projects, and help with code. "
-    "Never claim you cannot open YouTube or websites — browser opens are real. "
-    "Never claim to be BERT. If asked what model you are, say you are Immortility "
-    "running locally via an OpenAI-compatible server (vLLM Qwen3-8B by default; "
-    "Ollama or other backends via config) with optional Gemini when available. "
-    "Address him as Reyansh. No long preambles. "
-    f"{REPLY_FORMAT_RULES}"
-)
+def _fast_system_prompt() -> str:
+    from core.config import load_prompt_file
+    from core.reply_format import reply_format_rules
+
+    try:
+        from memory.user_profile import get_user_name
+
+        user_name = get_user_name()
+    except Exception:
+        user_name = "there"
+    loaded = load_prompt_file(
+        "fast_system.txt",
+        user_name=user_name,
+        reply_format_rules=reply_format_rules(user_name),
+    )
+    if loaded.strip():
+        return loaded
+    return (
+        f"You are Immortility, {user_name}'s desktop AI assistant. "
+        f"Address the user as {user_name}. Be concise. "
+        f"{reply_format_rules(user_name)}"
+    )
 
 
 def fast_chat(
@@ -632,12 +670,19 @@ def fast_chat(
     *,
     history: list[dict[str, str]] | None = None,
     system: str | None = None,
-    max_output_tokens: int = 220,
+    max_output_tokens: int | None = None,
     extra_context: str = "",
 ) -> str:
     """Low-latency conversational reply (HUD chat + talk mode)."""
+    if max_output_tokens is None:
+        try:
+            from core.config import get_config
+
+            max_output_tokens = get_config().fast_chat_max_tokens
+        except Exception:
+            max_output_tokens = 220
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": system or _FAST_SYSTEM},
+        {"role": "system", "content": system or _fast_system_prompt()},
     ]
     if history:
         for m in history[-16:]:
@@ -667,8 +712,8 @@ def fast_chat(
     if reply:
         return reply
     return (
-        "I got an empty reply from the local model (Qwen think-mode quirk). "
-        "Try again — Immortility now uses Ollama with thinking disabled."
+        "I got an empty reply from the local model. "
+        "Try again — thinking/reasoning mode may need to be disabled for this backend."
     )
 
 

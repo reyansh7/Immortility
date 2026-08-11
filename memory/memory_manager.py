@@ -162,8 +162,20 @@ class MemoryManager:
                 self.conversation.add_bug_fix(msg["content"][:200])
 
     async def auto_learn(self, user_input: str) -> None:
-        """Extract facts/preferences from user input after a reply."""
+        """Extract facts/preferences from user input after a reply.
+
+        Rate-limited to avoid burning LLM quota on rapid-fire voice turns.
+        """
         import asyncio
+        import time
+
+        now = time.monotonic()
+        last = getattr(self, "_last_auto_learn_at", 0.0)
+        if now - last < 8.0:
+            return
+        text = (user_input or "").strip()
+        if len(text) < 8 or text.startswith("/"):
+            return
 
         from core.json_utils import parse_llm_json
         from core.llm import chat
@@ -182,6 +194,7 @@ Input: "fix this bug" -> []
 User message: {user_input}"""
 
         try:
+            self._last_auto_learn_at = now
             response = await asyncio.to_thread(
                 chat,
                 model="auto",
@@ -197,6 +210,7 @@ User message: {user_input}"""
                 data = data.get("items", data.get("results", []))
 
             if isinstance(data, list):
+                learned_bits: list[str] = []
                 for item in data:
                     cat = item.get("category")
                     k = item.get("key")
@@ -204,6 +218,7 @@ User message: {user_input}"""
                     if cat and k and v:
                         self.store(cat, k, v)
                         logger.info("Auto-learned: %s -> %s = %s", cat, k, v)
+                        learned_bits.append(f"{cat}.{k} = {v}")
                         if cat in ("preference", "project"):
                             try:
                                 from knowledge.engine import KnowledgeEngine
@@ -213,6 +228,24 @@ User message: {user_input}"""
                                 ke._kg_db.set_fact(proj, str(k), str(v)[:500])
                             except Exception:
                                 pass
+                if learned_bits:
+                    try:
+                        from knowledge.learner import remember_text
+
+                        remember_text(
+                            "Facts learned from conversation:\n"
+                            + "\n".join(f"- {b}" for b in learned_bits),
+                            source="auto_learn",
+                            kind="conversation_fact",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from memory.user_profile import UserProfile
+
+                        UserProfile().maybe_learn_from_text(user_input)
+                    except Exception:
+                        pass
         except Exception as e:
             logger.debug("Auto-learn failed: %s", e)
 

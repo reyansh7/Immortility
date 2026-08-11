@@ -14,8 +14,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CONVERSATIONS_FILE = "memory/data/conversations.json"
-MAX_ENTRIES = 200
+
+def _default_conversations_path() -> Path:
+    try:
+        from core.repo_paths import conversations_path
+
+        return conversations_path()
+    except Exception:
+        return Path("memory/data/conversations.json")
+
+
+def _max_entries() -> int:
+    try:
+        from core.config import get_config
+
+        return get_config().max_conversation_entries
+    except Exception:
+        return 200
+
+
+CONVERSATIONS_FILE = str(_default_conversations_path())
+MAX_ENTRIES = 200  # fallback; prefer _max_entries() at runtime
 
 
 @dataclass
@@ -38,8 +57,8 @@ class ConversationMemory:
     - General notes
     """
 
-    def __init__(self, filepath: str = CONVERSATIONS_FILE) -> None:
-        self._path = Path(filepath)
+    def __init__(self, filepath: str | Path | None = None) -> None:
+        self._path = Path(filepath) if filepath else _default_conversations_path()
         self._entries: list[ConversationEntry] = []
         self._load()
 
@@ -58,8 +77,9 @@ class ConversationMemory:
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # Trim to max entries
-        if len(self._entries) > MAX_ENTRIES:
-            self._entries = self._entries[-MAX_ENTRIES:]
+        limit = _max_entries()
+        if len(self._entries) > limit:
+            self._entries = self._entries[-limit:]
         raw = [asdict(e) for e in self._entries]
         self._path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 

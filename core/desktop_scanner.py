@@ -356,9 +356,12 @@ def wants_projects_scan(query: str) -> bool:
     return False
 
 
-def format_projects_report(*, deep: bool = True, include_desktop: bool = True) -> str:
-    """Deterministic overview of Desktop/Projects — no RAG, no guessing."""
-    desktop = get_desktop_path()
+def format_projects_report(*, deep: bool = False, include_desktop: bool = True) -> str:
+    """Deterministic overview of Desktop/Projects — no RAG, no guessing.
+
+    Default is a compact list (not a fat per-folder dump). Pass deep=True only
+    when the user explicitly asks for structure/details inside each folder.
+    """
     proj = projects_dir()
     folders = list_project_folders(proj)
 
@@ -375,14 +378,17 @@ def format_projects_report(*, deep: bool = True, include_desktop: bool = True) -
         lines.append("_No folders found (path missing or empty)._")
     else:
         for i, name in enumerate(folders, 1):
-            lines.append(f"{i}. **{name}**")
             if deep:
+                lines.append(f"{i}. **{name}**")
                 detail = summarize_folder(proj / name)
                 lines.append(f"   - {detail}")
-            lines.append("")
+                lines.append("")
+            else:
+                lines.append(f"{i}. {name}")
 
     if include_desktop:
         top = list_desktop_top_folders()
+        lines.append("")
         lines.append(f"## Also on Desktop (outside Projects/) — {len(top)} folders")
         lines.append("")
         for i, name in enumerate(top, 1):
@@ -390,10 +396,129 @@ def format_projects_report(*, deep: bool = True, include_desktop: bool = True) -
         lines.append("")
 
     lines.append(
-        "_This list is from a live filesystem scan. "
-        "It is not a single open project (e.g. Resume Analyzer)._ "
+        "_Live filesystem scan — not inferred from memory._"
     )
     return "\n".join(lines)
+
+
+def format_projects_compact(*, include_desktop: bool = True) -> str:
+    """Short ground-truth inventory for LLM context / learning store."""
+    proj = projects_dir()
+    folders = list_project_folders(proj)
+    lines = [
+        f"Desktop/Projects path: {proj}",
+        f"Project folder count: {len(folders)}",
+        f"Projects: {', '.join(folders) if folders else '(none)'}",
+    ]
+    if include_desktop:
+        top = list_desktop_top_folders()
+        lines.append(f"Other Desktop folders ({len(top)}): {', '.join(top) if top else '(none)'}")
+    return "\n".join(lines)
+
+
+def wants_deep_projects_dump(query: str) -> bool:
+    """True only when the user asks for structure/details inside folders."""
+    low = (query or "").lower()
+    return bool(
+        re.search(
+            r"\b(structure|detailed|details|overview of each|what.?s inside|"
+            r"full list|tree|each folder|inside each)\b",
+            low,
+        )
+    )
+
+
+def answer_desktop_projects_query(
+    user_query: str,
+    *,
+    include_desktop: bool | None = None,
+    learn: bool = True,
+) -> str:
+    """Natural answer from a live scan — not a hardcoded fat markdown dump.
+
+    Also stores a compact inventory snapshot into TurboVec so Immortility
+    can recall it later via RAG.
+    """
+    low = (user_query or "").lower()
+    if include_desktop is None:
+        include_desktop = "desktop" in low or "all" in low
+
+    compact = format_projects_compact(include_desktop=bool(include_desktop))
+    folders = list_project_folders()
+    desk = list_desktop_top_folders() if include_desktop else []
+
+    if learn:
+        try:
+            from knowledge.learner import remember_desktop_inventory
+
+            remember_desktop_inventory(
+                f"User asked: {user_query}\nLive scan:\n{compact}"
+            )
+        except Exception:
+            pass
+
+    # Explicit full dump only when asked
+    if wants_deep_projects_dump(user_query):
+        return format_projects_report(deep=True, include_desktop=bool(include_desktop))
+
+    # Pure yes/no / existence questions → deterministic short answer (no LLM bloat)
+    if re.search(r"\b(any|are there|is there|do i have|how many)\b", low) and (
+        "project" in low or "folder" in low
+    ):
+        n = len(folders)
+        preview = ", ".join(folders[:6])
+        extra = n - 6
+        more = f", and {extra} more" if extra > 0 else ""
+        desk_bit = ""
+        if include_desktop and desk:
+            desk_bit = (
+                f" Also on the Desktop itself (outside Projects/): "
+                f"{', '.join(desk[:5])}"
+                + (f" +{len(desk) - 5} more." if len(desk) > 5 else ".")
+            )
+        if n == 0:
+            return (
+                "I scanned your Desktop/Projects folder live - it looks empty right now. "
+                f"Path checked: `{projects_dir()}`."
+                + (
+                    f" On the Desktop top level I do see: {', '.join(desk[:7])}."
+                    if desk
+                    else ""
+                )
+            )
+        return (
+            f"Yes - there are {n} project folders in Desktop/Projects: "
+            f"{preview}{more}."
+            f"{desk_bit} "
+            "Say if you want me to index any of them into my vector memory."
+        )
+
+    # Conversational answer grounded on live facts
+    try:
+        from core.llm import fast_chat
+        from core.reply_format import polish_reply
+
+        reply = fast_chat(
+            user_query,
+            extra_context=(
+                "Live filesystem ground truth (do not invent folders):\n"
+                f"{compact}\n\n"
+                "Answer briefly and naturally in plain text. "
+                "Do NOT dump a huge markdown inventory or per-folder file lists "
+                "unless the user asked for details/structure. "
+                "If they only asked whether projects exist, lead with yes/no and counts."
+            ),
+            max_output_tokens=220,
+        )
+        return polish_reply(reply) or spoken_projects_brief()
+    except Exception:
+        # Fallback without LLM
+        if not folders:
+            return f"No folders found under `{projects_dir()}`."
+        return (
+            f"Found {len(folders)} projects in Desktop/Projects: "
+            f"{', '.join(folders)}."
+        )
 
 
 def spoken_projects_brief() -> str:
@@ -407,7 +532,7 @@ def spoken_projects_brief() -> str:
     if extra > 0:
         return (
             f"Your Desktop Projects folder has {n} folders, including {preview}, "
-            f"and {extra} more. The full list is on screen."
+            f"and {extra} more."
         )
     return f"Your Desktop Projects folder has {n} folders: {preview}."
 
@@ -417,8 +542,14 @@ def whisper_vocabulary_hint() -> str:
     names = list_project_folders() + list_desktop_top_folders()
     # Keep prompt short
     sample = ", ".join(names[:20])
+    try:
+        from memory.user_profile import get_user_name
+
+        who = get_user_name()
+    except Exception:
+        who = "user"
     return (
-        "Reyansh Immortility coding assistant. "
+        f"{who} Immortility coding assistant. "
         f"Project names: {sample}. "
         "Desktop Projects folder."
     )

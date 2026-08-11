@@ -57,7 +57,8 @@ def sanitize_llm_path(path: str, project_root: Path | str) -> str | None:
     root = Path(project_root).resolve()
     proj_norm = str(root).replace("\\", "/").lower()
 
-    foreign_markers = ("/home/", "/users/", "/runner/work/", "ai-recruiting-platform")
+    # Generic foreign absolute-path markers (CI / Linux runners / other OS homes)
+    foreign_markers = ("/home/", "/users/", "/runner/work/")
     if any(m in raw.lower() for m in foreign_markers) and proj_norm not in raw.lower():
         return None
 

@@ -22,7 +22,14 @@ class ExperienceEntry:
 class ExperienceMemory:
     """Lightweight database to store and retrieve Bug/Fix experiences."""
 
-    def __init__(self, db_path: str | Path = ".immortility/experience.json"):
+    def __init__(self, db_path: str | Path | None = None):
+        if db_path is None:
+            try:
+                from core.repo_paths import experience_db_path
+
+                db_path = experience_db_path()
+            except Exception:
+                db_path = Path(".immortility/experience.json")
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: List[ExperienceEntry] = self._load()
@@ -74,21 +81,24 @@ class ExperienceMemory:
         logger.info("Experience memory cleared.")
 
     def get_relevant_experiences(self, query: str, limit: int = 3) -> List[ExperienceEntry]:
-        """Simple keyword matching for relevant experiences. 
-        Will be upgraded to vector search in Phase 3."""
+        """Keyword matching for relevant past bug/fix experiences."""
         if not query:
             return []
-        
+
         query_terms = set(query.lower().split())
         scored = []
         for entry in self._cache:
             score = 0
-            text = f"{entry.error_message} {entry.file_path}".lower()
+            text = (
+                f"{entry.error_message} {entry.root_cause} "
+                f"{entry.fix_applied} {entry.file_path}"
+            ).lower()
             for term in query_terms:
-                if len(term) > 3 and term in text:
-                    score += 1
+                # Include short technical tokens (css, bug, jwt, etc.)
+                if len(term) >= 2 and term in text:
+                    score += 1 if len(term) <= 3 else 2
             if score > 0:
                 scored.append((score, entry))
-                
+
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item[1] for item in scored[:limit]]

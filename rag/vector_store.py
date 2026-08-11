@@ -26,6 +26,27 @@ logger = logging.getLogger(__name__)
 
 CODE_COLLECTION = "code_chunks"
 DOCS_COLLECTION = "documentation"
+
+
+def _embedding_dim() -> int:
+    try:
+        from core.config import get_config
+
+        return int(get_config().embedding_dim)
+    except Exception:
+        return 384
+
+
+def _bit_width() -> int:
+    try:
+        from core.config import get_config
+
+        return int(get_config().bit_width)
+    except Exception:
+        return 4
+
+
+# Module-level defaults (tests / older call sites)
 EMBEDDING_DIM = 384
 BIT_WIDTH = 4
 
@@ -115,9 +136,9 @@ class VectorStore:
                     logger.warning(
                         "TurboVec load failed (%s) — creating empty index", exc
                     )
-                    self._index = IdMapIndex(dim=EMBEDDING_DIM, bit_width=BIT_WIDTH)
+                    self._index = IdMapIndex(dim=_embedding_dim(), bit_width=_bit_width())
             else:
-                self._index = IdMapIndex(dim=EMBEDDING_DIM, bit_width=BIT_WIDTH)
+                self._index = IdMapIndex(dim=_embedding_dim(), bit_width=_bit_width())
 
             logger.info(
                 "TurboVec connected: dir=%s collection=%s chunks=%d",
@@ -178,9 +199,10 @@ class VectorStore:
                 vectors = np.asarray(batch_emb, dtype=np.float32)
                 if vectors.ndim == 1:
                     vectors = vectors.reshape(1, -1)
-                if vectors.shape[1] != EMBEDDING_DIM:
+                dim = _embedding_dim()
+                if vectors.shape[1] != dim:
                     raise ValueError(
-                        f"Expected embedding dim {EMBEDDING_DIM}, got {vectors.shape[1]}"
+                        f"Expected embedding dim {dim}, got {vectors.shape[1]}"
                     )
                 self._index.add_with_ids(vectors, uids)
 

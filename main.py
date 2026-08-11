@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+from logging.handlers import RotatingFileHandler
 
 # pyrefly: ignore [missing-import]
 from rich.console import Console
@@ -40,13 +41,29 @@ console = Console()
 
 # ── Logging setup ───────────────────────────────────────────────────
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    handlers=[
-        logging.FileHandler("immortility.log", encoding="utf-8"),
-    ],
-)
+def _setup_logging() -> None:
+    from core.config import get_config
+    from core.repo_paths import main_log_path
+
+    cfg = get_config()
+    log_path = main_log_path()
+    root = logging.getLogger()
+    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        return
+    handler = RotatingFileHandler(
+        str(log_path),
+        maxBytes=cfg.log_max_bytes,
+        backupCount=cfg.log_backup_count,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    )
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+
+_setup_logging()
 # Suppress noisy third-party loggers
 for name in ("turbovec", "sentence_transformers", "httpx", "urllib3", "openai"):
     logging.getLogger(name).setLevel(logging.WARNING)
@@ -68,26 +85,49 @@ def _get_engine():
     return _knowledge_engine
 
 
-_HEAVY_CHAT_HINTS = (
-    "fix", "bug", "error", "implement", "refactor", "edit", "create file",
-    "write code", "patch", "commit", "pull request", "debug", "traceback",
-    "open project", "run the", "install", "deploy", "test suite", "leetcode",
-)
+from core.intent import HEAVY_CHAT_HINTS, STOP_PHRASES, is_coding_intent, is_heavy_chat
 
 
 def _looks_like_fast_chat(text: str) -> bool:
     """True for short conversational turns that should skip RAG/routing."""
     t = (text or "").strip()
-    if not t or len(t) > 140:
+    try:
+        from core.config import get_config
+
+        char_limit = get_config().fast_chat_char_limit
+    except Exception:
+        char_limit = 140
+    if not t or len(t) > char_limit:
         return False
     if t.startswith("/"):
         return False
     low = t.lower()
-    if any(h in low for h in _HEAVY_CHAT_HINTS):
+    if is_heavy_chat(t) or is_coding_intent(t):
         return False
-    if "\\" in t or "/" in t and ("." in t or "src" in low or "desktop" in low):
+    # Path-like tokens → project/RAG path
+    if ("\\" in t or "/" in t) and ("." in t or "src" in low or "desktop" in low):
+        return False
+    # Code questions that look short but need retrieval
+    code_q = (
+        "what does",
+        "how does",
+        "where is",
+        "where does",
+        "function do",
+        "in the code",
+        "this file",
+        "that file",
+        "look at",
+        "show me the",
+    )
+    if any(q in low for q in code_q):
         return False
     return True
+
+
+# Back-compat aliases
+_HEAVY_CHAT_HINTS = HEAVY_CHAT_HINTS
+_STOP_PHRASES = STOP_PHRASES
 
 
 async def _speak_if_enabled(text: str) -> None:
@@ -108,41 +148,25 @@ async def _speak_if_enabled(text: str) -> None:
 
 
 async def handle_desktop_projects_request(user_input: str) -> str:
-    """Analyze/list Desktop/Projects via live filesystem scan (not active-project RAG)."""
-    import re
-
+    """Answer Desktop/Projects questions from a live scan — natural, not a fat dump."""
     from core.desktop_scanner import (
-        format_projects_report,
+        answer_desktop_projects_query,
         list_project_folders,
         projects_dir,
-        spoken_projects_brief,
     )
 
-    low = user_input.lower()
-    # Deep folder peek only when explicitly analyzing; listing stays instant
-    deep = bool(re.search(r"analy[sz]e|overview|structure|detail", low))
-    # "all projects on desktop" → include Desktop top-level folders
-    include_desktop = "desktop" in low or "all" in low
-    report = format_projects_report(deep=deep, include_desktop=include_desktop)
+    reply = answer_desktop_projects_query(user_input, learn=True)
     folders = list_project_folders()
 
     console.print("\n[bold blue][DESKTOP/PROJECTS][/bold blue]")
     console.print(f"[dim]Live scan of {projects_dir()} — {len(folders)} folders[/dim]")
-    console.print(Panel(Markdown(report), title="📁 Desktop/Projects", border_style="green"))
+    console.print(Panel(Markdown(reply), title="🧠 Immortility", border_style="cyan"))
 
-    # Persist a short assistant note so chat history stays accurate
     state = AgentState()
-    brief = spoken_projects_brief()
     state.append_message("user", user_input)
-    state.append_message("assistant", report)
+    state.append_message("assistant", reply)
     state.save()
-    return report if not deep else f"{report}\n\nSpoken summary: {brief}"
-
-
-_STOP_PHRASES = frozenset({
-    "stop", "exit", "quit", "goodbye", "good bye", "bye",
-    "end conversation", "stop talking", "end talk",
-})
+    return reply
 
 
 async def run_speech_to_speech(memory: str) -> None:
@@ -176,109 +200,113 @@ async def run_speech_to_speech(memory: str) -> None:
         voice_name = await asyncio.to_thread(get_voice().set_male_voice)
         console.print(f"[green]Ready.[/green] Voice: {voice_name}")
     except Exception as exc:
-        _voice_enabled = False
         console.print(f"[red]Could not start talk mode: {exc}[/red]")
         console.print("[dim]Need: pip install faster-whisper sounddevice numpy pyttsx3[/dim]")
+        _voice_enabled = False
         return
 
-    await _speak_if_enabled(
-        "Talk mode is on. While I am speaking, say stop to interrupt me."
-    )
+    try:
+        await _speak_if_enabled(
+            "Talk mode is on. While I am speaking, say stop to interrupt me."
+        )
 
-    state = AgentState()
-    vocab = whisper_vocabulary_hint()
-    while True:
-        try:
-            console.print("\n[bold cyan]🎤 Your turn — speak now[/bold cyan]")
-            with console.status("[bold cyan]Listening (offline Whisper)…[/bold cyan]", spinner="dots"):
-                heard = await asyncio.to_thread(
-                    lambda: get_voice().listen(initial_prompt=vocab)
-                )
-            heard = (heard or "").strip()
-            if not heard:
-                console.print("[yellow]Nothing heard — try again.[/yellow]")
-                continue
-
-            console.print(f"[green]You:[/green] {heard}")
-            if heard.lower().strip("!.?") in _STOP_PHRASES or heard.lower().startswith("stop "):
-                await _speak_if_enabled("Okay, ending talk mode.")
-                console.print("[magenta]Talk mode ended.[/magenta]")
-                break
-
-            ctx_parts: list[str] = []
-            # Ground-truth filesystem when user asks about projects / desktop
-            if wants_projects_scan(heard):
-                from core.desktop_scanner import format_projects_report, spoken_projects_brief
-
-                report = format_projects_report(deep=False, include_desktop=True)
-                console.print(
-                    Panel(Markdown(report), title="📁 Desktop/Projects", border_style="green")
-                )
-                state.append_message("user", heard)
-                state.append_message("assistant", report)
-                state.save()
-                await _speak_if_enabled(spoken_projects_brief())
-                continue
-
-            with console.status(f"[bold cyan]🧠 {active_backend()}…[/bold cyan]", spinner="bouncingBar"):
-                try:
-                    from tools.hud_state import set_face
-
-                    set_face("thinking")
-                except Exception:
-                    pass
-                from core.llm import fast_chat
-
-                hist = [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in (state.conversation_history or [])[-6:]
-                    if m.get("role") in {"user", "assistant"} and m.get("content")
-                ]
-                reply = await asyncio.to_thread(
-                    fast_chat,
-                    heard,
-                    history=hist,
-                    max_output_tokens=200,
-                )
-                try:
-                    from tools.hud_state import set_face
-
-                    set_face("idle")
-                except Exception:
-                    pass
-            state.mode = "CHAT"
-            state.append_message("user", heard)
-            state.append_message("assistant", reply)
-            state.save()
-            console.print(Panel(Markdown(reply), title="🧠 Immortility", border_style="cyan"))
-            await _speak_if_enabled(reply)
-        except KeyboardInterrupt:
-            console.print("\n[magenta]Talk mode interrupted.[/magenta]")
-            break
-        except Exception as exc:
-            msg = str(exc)
-            low = msg.lower()
-            if "out of memory" in low or "cudamalloc" in low:
-                console.print(
-                    "[red]Talk turn failed:[/red] Local fallback needed more GPU memory.\n"
-                    "[dim]Using llama3.2:3b + CPU retry — restart Immortility to load the fix.[/dim]"
-                )
-            elif "quota" in low or "429" in low or "resource_exhausted" in low:
-                console.print(
-                    "[yellow]Gemini quota hit[/yellow] — local fallback also failed.\n"
-                    "[dim]Wait ~1 min or check https://ai.dev/rate-limit — then try again.[/dim]"
-                )
-            else:
-                console.print(f"[red]Talk turn failed:[/red] {exc}")
-            logging.exception("speech-to-speech turn failed")
+        state = AgentState()
+        vocab = whisper_vocabulary_hint()
+        while True:
             try:
-                await _speak_if_enabled(
-                    "Sorry, I hit a brain glitch. Try saying that again."
-                )
-            except Exception:
-                pass
+                console.print("\n[bold cyan]🎤 Your turn — speak now[/bold cyan]")
+                with console.status("[bold cyan]Listening (offline Whisper)…[/bold cyan]", spinner="dots"):
+                    heard = await asyncio.to_thread(
+                        lambda: get_voice().listen(initial_prompt=vocab)
+                    )
+                heard = (heard or "").strip()
+                if not heard:
+                    console.print("[yellow]Nothing heard — try again.[/yellow]")
+                    continue
 
-    _voice_enabled = False
+                console.print(f"[green]You:[/green] {heard}")
+                if heard.lower().strip("!.?") in _STOP_PHRASES or heard.lower().startswith("stop "):
+                    await _speak_if_enabled("Okay, ending talk mode.")
+                    console.print("[magenta]Talk mode ended.[/magenta]")
+                    break
+
+                # Ground-truth filesystem when user asks about projects / desktop
+                if wants_projects_scan(heard):
+                    from core.desktop_scanner import (
+                        answer_desktop_projects_query,
+                        spoken_projects_brief,
+                    )
+
+                    report = answer_desktop_projects_query(heard, learn=True)
+                    console.print(
+                        Panel(Markdown(report), title="🧠 Immortility", border_style="cyan")
+                    )
+                    state.append_message("user", heard)
+                    state.append_message("assistant", report)
+                    state.save()
+                    await _speak_if_enabled(spoken_projects_brief())
+                    continue
+
+                with console.status(f"[bold cyan]🧠 {active_backend()}…[/bold cyan]", spinner="bouncingBar"):
+                    try:
+                        from tools.hud_state import set_face
+
+                        set_face("thinking")
+                    except Exception:
+                        pass
+                    from core.llm import fast_chat
+                    from core.config import get_config
+
+                    hist = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in (state.conversation_history or [])[-6:]
+                        if m.get("role") in {"user", "assistant"} and m.get("content")
+                    ]
+                    reply = await asyncio.to_thread(
+                        fast_chat,
+                        heard,
+                        history=hist,
+                        max_output_tokens=get_config().speech_max_tokens,
+                    )
+                    try:
+                        from tools.hud_state import set_face
+
+                        set_face("idle")
+                    except Exception:
+                        pass
+                state.mode = "CHAT"
+                state.append_message("user", heard)
+                state.append_message("assistant", reply)
+                state.save()
+                console.print(Panel(Markdown(reply), title="🧠 Immortility", border_style="cyan"))
+                await _speak_if_enabled(reply)
+            except KeyboardInterrupt:
+                console.print("\n[magenta]Talk mode interrupted.[/magenta]")
+                break
+            except Exception as exc:
+                msg = str(exc)
+                low = msg.lower()
+                if "out of memory" in low or "cudamalloc" in low:
+                    console.print(
+                        "[red]Talk turn failed:[/red] Local fallback needed more GPU memory.\n"
+                        "[dim]Using llama3.2:3b + CPU retry — restart Immortility to load the fix.[/dim]"
+                    )
+                elif "quota" in low or "429" in low or "resource_exhausted" in low:
+                    console.print(
+                        "[yellow]Gemini quota hit[/yellow] — local fallback also failed.\n"
+                        "[dim]Wait ~1 min or check https://ai.dev/rate-limit — then try again.[/dim]"
+                    )
+                else:
+                    console.print(f"[red]Talk turn failed:[/red] {exc}")
+                logging.exception("speech-to-speech turn failed")
+                try:
+                    await _speak_if_enabled(
+                        "Sorry, I hit a brain glitch. Try saying that again."
+                    )
+                except Exception:
+                    pass
+    finally:
+        _voice_enabled = False
 
 # ── Pending action handler (unchanged from Phase 1) ─────────────────
 
@@ -289,6 +317,7 @@ async def handle_pending_action(user_input: str) -> bool:
     Returns True if handled (caller should continue loop).
     """
     state = AgentState()
+    state.reload()
     if not state.pending_action:
         return False
 
@@ -634,12 +663,12 @@ async def auto_discover_and_open_project(user_input: str) -> None:
         dirs_to_check = []
         try:
             dirs_to_check.extend([d for d in desktop.iterdir() if d.is_dir()])
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.warning("Desktop scan failed (%s): %s", desktop, exc)
         try:
             dirs_to_check.extend([d for d in docs.iterdir() if d.is_dir()])
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.warning("Documents scan failed (%s): %s", docs, exc)
             
         dir_names_lower = [d.name.lower() for d in dirs_to_check]
         words = [w.strip("\"'.,!?") for w in cleaned.split()]
@@ -687,9 +716,12 @@ async def handle_project_query(user_input: str, memory: str):
     """Handle project-related queries using the Knowledge Engine."""
     engine = _get_engine()
     state = AgentState()
+    state.reload()
     user_input = sanitize_text(user_input)
     cleaned, embedded_path = extract_open_path(user_input)
     lower = cleaned.lower()
+    active = engine.get_active_project()
+    project_path = active.path if active else None
 
     # Skip slash-only commands handled by main loop
     if user_input.strip().lower().startswith("/") and not embedded_path:
@@ -817,13 +849,6 @@ async def handle_project_query(user_input: str, memory: str):
     # ── Coding workflow for edit/refactor/fix/debug requests ─────
     from editing.error_classifier import is_error_report
 
-    edit_keywords = (
-        "rename", "refactor", "fix", "debug", "add logging", "convert",
-        "replace", "split", "optimize", "implement", "update file", "create file", "create component",
-        "add ", "login", "navbar", "fastapi",
-        "move ", "jwt", "authentication", "make the changes", "make these changes",
-        "404", "missing page", "page.tsx",
-    )
     runtime_error = is_error_report(cleaned) or (
         "react client manifest" in lower
         or "could not find the module" in lower
@@ -835,7 +860,7 @@ async def handle_project_query(user_input: str, memory: str):
     project_path = active.path if active else None
 
     is_edit_request = (not is_run_request) and (
-        runtime_error or any(kw in lower for kw in edit_keywords)
+        runtime_error or is_coding_intent(cleaned)
     )
 
     if is_edit_request and not project_path:
@@ -1048,209 +1073,159 @@ async def main():
         elif not user_stripped:
             continue
             
-        # Queue input for background memory extraction AFTER response completes
+        # Queue input for background memory extraction (finally runs even on continue)
         _pending_auto_learn = user_stripped
-
         user_lower = user_stripped.lower()
 
-        if user_lower in ("exit", "/exit"):
-            break
-            
-        if user_lower == "/auto":
-            auto_mode = not auto_mode
-            console.print(f"[magenta]AUTO mode {'on' if auto_mode else 'off'}[/magenta]")
-            continue
-        
-        if user_lower == "/hud":
-            _launch_immortility_hud()
-            continue
-
-        if user_lower == "/talk":
-            await run_speech_to_speech(memory)
-            voice_mode = False
-            _voice_enabled = False
-            continue
-
-        if user_lower == "/voice":
-            # Alias: continuous speech-to-speech with local model only
-            await run_speech_to_speech(memory)
-            voice_mode = False
-            _voice_enabled = False
-            continue
-
-        if user_lower == "/listen":
-            heard = await listen_for_input()
-            if not heard:
-                continue
-            user_stripped = heard
-            user_lower = user_stripped.lower()
-            _pending_auto_learn = user_stripped
-            _voice_enabled = True
-            voice_mode = True
-            # fall through into normal routing
-
-        if user_lower == "/clear":
-            state.conversation_history = []
-            state.research_context = None
-            state.pending_action = None
-            state.current_task = None
-            state.save()
-            console.print("[green]State cleared.[/green]")
-            continue
-            
-        # ── Phase 2 commands ────────────────────────────────────────
-        if user_lower.startswith("/open"):
-            lines = user_stripped.splitlines()
-            first_line = lines[0]
-            path = extract_open_path_only(first_line)
-            if path:
-                try:
-                    engine = _get_engine()
-                    console.print(f"[cyan]Indexing project: {path}[/cyan]")
-                    info = engine.open_project(path)
-                    state.active_project = info.name
-                    state.save()
-                    console.print(f"[bold green]Project indexed![/bold green]")
-                    console.print(f"[blue]{info.summary()}[/blue]")
-                    follow_up = "\n".join(lines[1:]).strip()
-                    if follow_up:
-                        console.print(f"[dim]Continuing with: {follow_up[:80]}...[/dim]")
-                        await handle_project_query(follow_up, memory)
-                except Exception as exc:
-                    console.print(f"[red]Error: {exc}[/red]")
-            else:
-                console.print("[yellow]Usage: /open <project-path>[/yellow]")
-            continue
-
-        if user_lower == "/memory":
-            try:
-                engine = _get_engine()
-                stats = engine.stats()
-                console.print("[bold blue]Knowledge Engine Status[/bold blue]")
-                console.print(f"  Vector DB: {stats['vector_store']['total_chunks']} chunks")
-                console.print(f"  Docs DB: {stats['docs_store']['total_chunks']} chunks")
-                console.print(f"  Cache: {stats['cache']['size']} entries")
-                console.print(f"  Active Project: {stats['active_project'] or 'None'}")
-                console.print(f"  Remembered Projects: {', '.join(stats['remembered_projects']) or 'None'}")
-                console.print(f"  Conversations: {stats['conversation_entries']} entries")
-                console.print(f"  Preferences: {stats['preferences']} entries")
-            except Exception as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-            continue
-
-        if user_lower.startswith("/import-docs "):
-            parts = user_stripped[13:].strip().split(" ", 1)
-            if len(parts) == 2:
-                name, path = parts
-                try:
-                    engine = _get_engine()
-                    console.print(f"[cyan]Importing docs '{name}' from {path}...[/cyan]")
-                    count = engine.import_docs(name, path)
-                    console.print(f"[green]Imported {count} documentation chunks.[/green]")
-                except Exception as exc:
-                    console.print(f"[red]Error: {exc}[/red]")
-            else:
-                console.print("[yellow]Usage: /import-docs <name> <path>[/yellow]")
-            continue
-
-        if user_lower == "/projects":
-            try:
-                engine = _get_engine()
-                projects = engine.recall("project")
-                if projects:
-                    console.print("[bold blue]Remembered Projects:[/bold blue]")
-                    for p in projects:
-                        console.print(f"  • {p}")
-                else:
-                    console.print("[dim]No projects remembered yet.[/dim]")
-            except Exception as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-            continue
-
-        if await handle_pending_coding_plan(user_stripped):
-            continue
-
-        if await handle_pending_action(user_stripped):
-            continue
-
-        # Fast path FIRST: desktop/projects scan — no RAG, no Knowledge Engine, no Gemini wait
-        from core.desktop_scanner import spoken_projects_brief, wants_projects_scan
-
-        if wants_projects_scan(user_stripped):
-            console.print("[dim]Live filesystem scan (fast path)…[/dim]")
-            await handle_desktop_projects_request(user_stripped)
-            if _voice_enabled or voice_mode:
-                await _speak_if_enabled(spoken_projects_brief())
-            continue
-
-        # Fast conversational path: skip RAG/routing for short casual chat
-        if _looks_like_fast_chat(user_stripped):
-            state.mode = "CHAT"
-            state.save()
-            console.print("\n[bold blue][CHAT][/bold blue] [dim]fast[/dim]")
-            with console.status("[bold cyan]🧠 Thinking...[/bold cyan]", spinner="bouncingBar"):
-                from core.llm import fast_chat
-
-                hist = [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in (state.conversation_history or [])[-6:]
-                    if m.get("role") in {"user", "assistant"} and m.get("content")
-                ]
-                response = await asyncio.to_thread(
-                    fast_chat,
-                    user_stripped,
-                    history=hist,
-                    max_output_tokens=280,
-                )
-                state.append_message("user", user_stripped)
-                state.append_message("assistant", response)
-            console.print(Panel(Markdown(response), title="🧠 Immortility", border_style="cyan"))
-            await speak_reply(response)
-            continue
-
-        await auto_discover_and_open_project(user_stripped)
-
         try:
-            console.print("[dim]Routing...[/dim]")
+            # Learn user name from casual introductions
+            try:
+                from memory.user_profile import UserProfile
 
-            if is_summarize_request(user_stripped):
-                state.mode = "ACTION"
+                UserProfile().maybe_learn_from_text(user_stripped)
+            except Exception:
+                pass
+
+            if user_lower in ("exit", "/exit"):
+                break
+                
+            if user_lower == "/auto":
+                auto_mode = not auto_mode
+                console.print(f"[magenta]AUTO mode {'on' if auto_mode else 'off'}[/magenta]")
+                continue
+            
+            if user_lower == "/hud":
+                _launch_immortility_hud()
+                continue
+
+            if user_lower == "/talk":
+                await run_speech_to_speech(memory)
+                voice_mode = False
+                _voice_enabled = False
+                continue
+
+            if user_lower == "/voice":
+                # Alias: continuous speech-to-speech with local model only
+                await run_speech_to_speech(memory)
+                voice_mode = False
+                _voice_enabled = False
+                continue
+
+            if user_lower == "/listen":
+                heard = await listen_for_input()
+                if not heard:
+                    continue
+                user_stripped = heard
+                user_lower = user_stripped.lower()
+                _pending_auto_learn = user_stripped
+                _voice_enabled = True
+                voice_mode = True
+                # fall through into normal routing
+
+            if user_lower == "/clear":
+                state.conversation_history = []
+                state.research_context = None
+                state.pending_action = None
+                state.current_task = None
                 state.save()
-                with console.status("[bold cyan]📖 Summarizing...[/bold cyan]", spinner="bouncingBar"):
-                    summary = await handle_summarize_webpage()
-                console.print(Panel(Markdown(summary), title="📝 Summary", border_style="cyan"))
-                await speak_reply(summary)
+                console.print("[green]State cleared.[/green]")
+                continue
+                
+            # ── Phase 2 commands ────────────────────────────────────────
+            if user_lower.startswith("/open"):
+                lines = user_stripped.splitlines()
+                first_line = lines[0]
+                path = extract_open_path_only(first_line)
+                if path:
+                    try:
+                        engine = _get_engine()
+                        console.print(f"[cyan]Indexing project: {path}[/cyan]")
+                        info = engine.open_project(path)
+                        state.active_project = info.name
+                        state.save()
+                        console.print(f"[bold green]Project indexed![/bold green]")
+                        console.print(f"[blue]{info.summary()}[/blue]")
+                        follow_up = "\n".join(lines[1:]).strip()
+                        if follow_up:
+                            console.print(f"[dim]Continuing with: {follow_up[:80]}...[/dim]")
+                            await handle_project_query(follow_up, memory)
+                    except Exception as exc:
+                        console.print(f"[red]Error: {exc}[/red]")
+                else:
+                    console.print("[yellow]Usage: /open <project-path>[/yellow]")
                 continue
 
-            if is_page_query(user_stripped):
-                registry = ToolRegistry()
-                registry.setup()
-                result = await registry.execute("get_current_url", {})
-                data = json.loads(result)
-                url = data.get("result", {}).get("url", "No page open")
-                console.print(f"\n[bold blue]Current page:[/bold blue] {url}")
-                state.append_message("assistant", f"You are on: {url}")
+            if user_lower == "/memory":
+                try:
+                    engine = _get_engine()
+                    stats = engine.stats()
+                    console.print("[bold blue]Knowledge Engine Status[/bold blue]")
+                    console.print(f"  Vector DB: {stats['vector_store']['total_chunks']} chunks")
+                    console.print(f"  Docs DB: {stats['docs_store']['total_chunks']} chunks")
+                    console.print(f"  Cache: {stats['cache']['size']} entries")
+                    console.print(f"  Active Project: {stats['active_project'] or 'None'}")
+                    console.print(f"  Remembered Projects: {', '.join(stats['remembered_projects']) or 'None'}")
+                    console.print(f"  Conversations: {stats['conversation_entries']} entries")
+                    console.print(f"  Preferences: {stats['preferences']} entries")
+                except Exception as exc:
+                    console.print(f"[red]Error: {exc}[/red]")
                 continue
 
-            with console.status("[bold cyan]🔄 Routing...[/bold cyan]", spinner="dots"):
-                engine = _get_engine()
-                # Context-first orchestration: retrieve once before intent routing.
-                orchestrated_context = engine.get_routing_context(user_stripped)
-                route = await classify_route(user_stripped, routing_context=orchestrated_context)
+            if user_lower.startswith("/import-docs "):
+                parts = user_stripped[13:].strip().split(" ", 1)
+                if len(parts) == 2:
+                    name, path = parts
+                    try:
+                        engine = _get_engine()
+                        console.print(f"[cyan]Importing docs '{name}' from {path}...[/cyan]")
+                        count = engine.import_docs(name, path)
+                        console.print(f"[green]Imported {count} documentation chunks.[/green]")
+                    except Exception as exc:
+                        console.print(f"[red]Error: {exc}[/red]")
+                else:
+                    console.print("[yellow]Usage: /import-docs <name> <path>[/yellow]")
+                continue
 
-            if route == "CHAT":
+            if user_lower == "/projects":
+                try:
+                    engine = _get_engine()
+                    projects = engine.recall("project")
+                    if projects:
+                        console.print("[bold blue]Remembered Projects:[/bold blue]")
+                        for p in projects:
+                            console.print(f"  • {p}")
+                    else:
+                        console.print("[dim]No projects remembered yet.[/dim]")
+                except Exception as exc:
+                    console.print(f"[red]Error: {exc}[/red]")
+                continue
+
+            if await handle_pending_coding_plan(user_stripped):
+                continue
+
+            if await handle_pending_action(user_stripped):
+                continue
+
+            # Fast path FIRST: desktop/projects scan — no RAG, no Knowledge Engine, no Gemini wait
+            from core.desktop_scanner import spoken_projects_brief, wants_projects_scan
+
+            if wants_projects_scan(user_stripped):
+                console.print("[dim]Live filesystem scan (fast path)…[/dim]")
+                await handle_desktop_projects_request(user_stripped)
+                if _voice_enabled or voice_mode:
+                    await _speak_if_enabled(spoken_projects_brief())
+                continue
+
+            # Fast conversational path: skip RAG/routing for short casual chat
+            if _looks_like_fast_chat(user_stripped):
+                from core.config import get_config
+
                 state.mode = "CHAT"
                 state.save()
-                console.print("\n[bold blue][CHAT][/bold blue]")
+                console.print("\n[bold blue][CHAT][/bold blue] [dim]fast[/dim]")
                 with console.status("[bold cyan]🧠 Thinking...[/bold cyan]", spinner="bouncingBar"):
                     from core.llm import fast_chat
 
-                    # Keep replies snappy — skip huge system prompt + long RAG dump
-                    extra = ""
-                    if orchestrated_context:
-                        extra = orchestrated_context[:1800]
-                    elif memory:
-                        extra = memory[:1200]
                     hist = [
                         {"role": m["role"], "content": m["content"]}
                         for m in (state.conversation_history or [])[-6:]
@@ -1260,81 +1235,143 @@ async def main():
                         fast_chat,
                         user_stripped,
                         history=hist,
-                        extra_context=extra,
-                        max_output_tokens=320,
+                        max_output_tokens=get_config().cli_fast_chat_max_tokens,
                     )
                     state.append_message("user", user_stripped)
                     state.append_message("assistant", response)
                 console.print(Panel(Markdown(response), title="🧠 Immortility", border_style="cyan"))
                 await speak_reply(response)
+                continue
 
-            elif route == "ACTION":
-                state.mode = "ACTION"
-                state.save()
-                if is_run_project_request(user_stripped):
-                    engine = _get_engine()
-                    active = engine.get_active_project()
-                    path = active.path if active else None
-                    if not path:
-                        _, path = extract_open_path(user_stripped)
-                    if path:
-                        await handle_run_project(path, user_stripped)
-                    else:
-                        console.print("[red]Open a project first: /open <path>[/red]")
-                else:
-                    action_context = ""
-                    try:
-                        # Action context extends the initial orchestration with multi-hop graph context.
-                        action_context = _get_engine().get_action_context(user_stripped)
-                    except Exception:
-                        action_context = ""
-                    await execute_action(user_stripped, context_override=action_context)
+            await auto_discover_and_open_project(user_stripped)
 
-            elif route == "PROJECT":
-                state.mode = "PROJECT"
-                state.save()
-                console.print("\n[bold blue][PROJECT][/bold blue]")
-                await handle_project_query(user_stripped, memory)
-
-            elif route in ("TASK", "RESEARCH_TASK"):
-                state.mode = route
-                state.save()
-                is_research = route == "RESEARCH_TASK"
-
-                if auto_mode or (is_research and "leetcode" in user_lower):
-                    await execute_workflow(user_stripped, memory, "4", is_research)
-                elif is_coding_request(user_stripped):
-                    await execute_workflow(user_stripped, memory, "2", is_research)
-                else:
-                    console.print(f"\n[bold yellow][{route}][/bold yellow]")
-                    console.print("1. Plan  2. Code  3. Execute  4. Full Workflow")
-                    choice = await asyncio.to_thread(
-                        console.input, "[bold yellow]Choice (1-4): [/bold yellow]"
-                    )
-                    if choice in ("1", "2", "3", "4"):
-                        await execute_workflow(user_stripped, memory, choice, is_research)
-                    else:
-                        console.print("[red]Invalid choice.[/red]")
-
-        except asyncio.CancelledError:
-            console.print("\n[red]Cancelled.[/red]")
-            state.pending_action = None
-            state.save()
-        except KeyboardInterrupt:
-            console.print("\n[red]Interrupted.[/red]")
-            break
-        except Exception as exc:
-            console.print(f"[red]Error: {exc}[/red]")
-            logging.exception("Main loop error")
-
-        # ── Sequential auto-learn: runs AFTER response streaming completes ──
-        if _pending_auto_learn:
             try:
-                engine = _get_engine()
-                await engine._memory.auto_learn(_pending_auto_learn)
-            except Exception:
-                pass
-            _pending_auto_learn = None
+                console.print("[dim]Routing...[/dim]")
+
+                if is_summarize_request(user_stripped):
+                    state.mode = "ACTION"
+                    state.save()
+                    with console.status("[bold cyan]📖 Summarizing...[/bold cyan]", spinner="bouncingBar"):
+                        summary = await handle_summarize_webpage()
+                    console.print(Panel(Markdown(summary), title="📝 Summary", border_style="cyan"))
+                    await speak_reply(summary)
+                    continue
+
+                if is_page_query(user_stripped):
+                    registry = ToolRegistry()
+                    registry.setup()
+                    result = await registry.execute("get_current_url", {})
+                    data = json.loads(result)
+                    url = data.get("result", {}).get("url", "No page open")
+                    console.print(f"\n[bold blue]Current page:[/bold blue] {url}")
+                    state.append_message("assistant", f"You are on: {url}")
+                    continue
+
+                with console.status("[bold cyan]🔄 Routing...[/bold cyan]", spinner="dots"):
+                    engine = _get_engine()
+                    # Context-first orchestration: retrieve once before intent routing.
+                    orchestrated_context = engine.get_routing_context(user_stripped)
+                    route = await classify_route(user_stripped, routing_context=orchestrated_context)
+
+                if route == "CHAT":
+                    from core.config import get_config
+
+                    state.mode = "CHAT"
+                    state.save()
+                    console.print("\n[bold blue][CHAT][/bold blue]")
+                    with console.status("[bold cyan]🧠 Thinking...[/bold cyan]", spinner="bouncingBar"):
+                        from core.llm import fast_chat
+
+                        # Keep replies snappy — skip huge system prompt + long RAG dump
+                        extra = ""
+                        if orchestrated_context:
+                            extra = orchestrated_context[:1800]
+                        elif memory:
+                            extra = memory[:1200]
+                        hist = [
+                            {"role": m["role"], "content": m["content"]}
+                            for m in (state.conversation_history or [])[-6:]
+                            if m.get("role") in {"user", "assistant"} and m.get("content")
+                        ]
+                        response = await asyncio.to_thread(
+                            fast_chat,
+                            user_stripped,
+                            history=hist,
+                            extra_context=extra,
+                            max_output_tokens=get_config().cli_chat_max_tokens,
+                        )
+                        state.append_message("user", user_stripped)
+                        state.append_message("assistant", response)
+                    console.print(Panel(Markdown(response), title="🧠 Immortility", border_style="cyan"))
+                    await speak_reply(response)
+
+                elif route == "ACTION":
+                    state.mode = "ACTION"
+                    state.save()
+                    if is_run_project_request(user_stripped):
+                        engine = _get_engine()
+                        active = engine.get_active_project()
+                        path = active.path if active else None
+                        if not path:
+                            _, path = extract_open_path(user_stripped)
+                        if path:
+                            await handle_run_project(path, user_stripped)
+                        else:
+                            console.print("[red]Open a project first: /open <path>[/red]")
+                    else:
+                        action_context = ""
+                        try:
+                            # Action context extends the initial orchestration with multi-hop graph context.
+                            action_context = _get_engine().get_action_context(user_stripped)
+                        except Exception:
+                            action_context = ""
+                        await execute_action(user_stripped, context_override=action_context)
+
+                elif route == "PROJECT":
+                    state.mode = "PROJECT"
+                    state.save()
+                    console.print("\n[bold blue][PROJECT][/bold blue]")
+                    await handle_project_query(user_stripped, memory)
+
+                elif route in ("TASK", "RESEARCH_TASK"):
+                    state.mode = route
+                    state.save()
+                    is_research = route == "RESEARCH_TASK"
+
+                    if auto_mode or (is_research and "leetcode" in user_lower):
+                        await execute_workflow(user_stripped, memory, "4", is_research)
+                    elif is_coding_request(user_stripped):
+                        await execute_workflow(user_stripped, memory, "2", is_research)
+                    else:
+                        console.print(f"\n[bold yellow][{route}][/bold yellow]")
+                        console.print("1. Plan  2. Code  3. Execute  4. Full Workflow")
+                        choice = await asyncio.to_thread(
+                            console.input, "[bold yellow]Choice (1-4): [/bold yellow]"
+                        )
+                        if choice in ("1", "2", "3", "4"):
+                            await execute_workflow(user_stripped, memory, choice, is_research)
+                        else:
+                            console.print("[red]Invalid choice.[/red]")
+
+            except asyncio.CancelledError:
+                console.print("\n[red]Cancelled.[/red]")
+                state.pending_action = None
+                state.save()
+            except KeyboardInterrupt:
+                console.print("\n[red]Interrupted.[/red]")
+                break
+            except Exception as exc:
+                console.print(f"[red]Error: {exc}[/red]")
+                logging.exception("Main loop error")
+        finally:
+            # Auto-learn runs even when a branch `continue`s (Python runs finally first)
+            if _pending_auto_learn:
+                try:
+                    engine = _get_engine()
+                    await engine._memory.auto_learn(_pending_auto_learn)
+                except Exception:
+                    pass
+                _pending_auto_learn = None
 
     # ── Shutdown ────────────────────────────────────────────────────
     console.print("[dim]Cleaning up resources and stopping background tasks...[/dim]")
