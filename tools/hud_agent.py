@@ -392,6 +392,14 @@ def handle_hud_request(
     if not message:
         return "Say something and I'll handle it, Reyansh."
 
+    try:
+        from memory.outcome_memory import get_outcome_memory, outcome_learning_enabled
+
+        if outcome_learning_enabled():
+            get_outcome_memory().score_and_record_previous(message)
+    except Exception:
+        pass
+
     multi_prefix = ""
 
     # Pending confirmation from a previous HUD/CLI action
@@ -534,50 +542,66 @@ def handle_hud_request(
     except Exception:
         pass
 
-    # Explicit web research / learn-from-web → search + store in TurboVec
-    if re.search(
-        r"\b(research|look up|search the web|learn about|find online|google)\b",
-        message,
-        re.I,
-    ) and not re.search(r"\b(youtube|netflix|open\s+chrome)\b", message, re.I):
+    # Shared source router — WEB only when policy says so (with RAG context)
+    try:
+        from core.source_router import choose_source
+
+        routing_ctx = ""
         try:
+            from knowledge.engine import KnowledgeEngine
+
+            # Cheap memory-aware signal so we don't web-search when RAG already knows
+            routing_ctx = KnowledgeEngine().get_routing_context(message, n_results=4) or ""
+        except Exception:
+            routing_ctx = ""
+
+        _src = choose_source(message, routing_context=routing_ctx)
+        if _src.source == "WEB":
             from agents.research_agent import ResearchAgent
-            from core.llm import fast_chat
             from core.reply_format import polish_reply
+            from memory.outcome_memory import get_outcome_memory
 
             def _run_research() -> str:
                 import asyncio
 
                 async def _go() -> str:
                     ctx = await ResearchAgent().execute(message)
-                    summary = fast_chat(
-                        message,
-                        extra_context=(
-                            "Web research notes (use these facts; cite sources briefly):\n"
-                            f"{(ctx.summary or '')}\n"
-                            f"{(ctx.extracted_text or '')[:3500]}\n"
-                            f"Sources: {', '.join(ctx.sources or [])}"
-                        ),
-                        max_output_tokens=320,
-                    )
-                    return polish_reply(summary) or (ctx.summary or "Research finished.")
+                    # Prefer agent synthesis; lightly polish
+                    body = (ctx.summary or ctx.extracted_text or "").strip()
+                    if not body:
+                        return "Web research returned no usable sources."
+                    return polish_reply(body)
 
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
                 if loop and loop.is_running():
-                    # HUD often already inside an event loop
                     import concurrent.futures
 
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                         return pool.submit(lambda: asyncio.run(_go())).result(timeout=180)
                 return asyncio.run(_go())
 
-            return (multi_prefix + _run_research()).strip()
-        except Exception as exc:
-            logger.exception("HUD web research failed")
-            return f"Web research failed: {exc}"
+            reply = (multi_prefix + _run_research()).strip()
+            try:
+                from core.critic import apply_critic_or_retry
+                import re as _re
+
+                urls = _re.findall(r"https?://[^\s\])>]+", reply)
+                reply = apply_critic_or_retry(message, reply, sources=urls, mode="WEB")
+            except Exception:
+                pass
+            try:
+                get_outcome_memory().set_pending(message, "WEB", reply)
+            except Exception:
+                pass
+            return reply
+    except Exception as exc:
+        logger.exception("HUD web research failed")
+        return f"Web research failed: {exc}"
+
+    # Explicit open / index already handled above; continue ladder
 
 
     # Index Immortility into local TurboVec (store code for RAG)
@@ -825,6 +849,14 @@ def handle_hud_request(
             f"\n\nNo code snippets retrieved for `{mentioned}` — say you need a "
             f"re-index rather than inventing features."
         )
+    try:
+        from memory.outcome_memory import lessons_for_prompt
+
+        lessons = lessons_for_prompt(message)
+        if lessons:
+            system += f"\n\n{lessons}"
+    except Exception:
+        pass
 
     hist = history_for_model(history, max_turns=16)
     reply = fast_chat(
@@ -835,6 +867,12 @@ def handle_hud_request(
     )
     try:
         update_focus_after_turn(message, reply, hist)
+    except Exception:
+        pass
+    try:
+        from memory.outcome_memory import get_outcome_memory
+
+        get_outcome_memory().set_pending(message, "CHAT", reply)
     except Exception:
         pass
     return reply

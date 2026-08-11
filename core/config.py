@@ -64,6 +64,14 @@ class ImmortilityConfig:
     log_max_bytes: int = 5_000_000
     log_backup_count: int = 3
 
+    # Learning / critic
+    outcome_learning: bool = True
+    critic_enabled: bool = True
+
+    # Web search
+    web_search_provider: str = "auto"
+    web_search_max_results: int = 5
+
     # Vector store compression defaults (overridden by embedder when available)
     embedding_dim: int = 384
     bit_width: int = 4
@@ -99,6 +107,12 @@ class ImmortilityConfig:
             ollama_think=_env_bool("IMMORTILITY_OLLAMA_THINK", False),
             log_max_bytes=_env_int("IMMORTILITY_LOG_MAX_BYTES", 5_000_000),
             log_backup_count=_env_int("IMMORTILITY_LOG_BACKUPS", 3),
+            outcome_learning=_env_bool("IMMORTILITY_OUTCOME_LEARNING", True),
+            critic_enabled=_env_bool("IMMORTILITY_CRITIC", True),
+            web_search_provider=(
+                os.environ.get("WEB_SEARCH_PROVIDER") or "auto"
+            ).strip().lower(),
+            web_search_max_results=_env_int("WEB_SEARCH_MAX_RESULTS", 5),
             embedding_dim=_env_int("IMMORTILITY_EMBEDDING_DIM", 384),
             bit_width=_env_int("IMMORTILITY_BIT_WIDTH", 4),
         )

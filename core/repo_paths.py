@@ -59,6 +59,18 @@ def experience_db_path() -> Path:
     return path / "experience.json"
 
 
+def outcomes_db_path() -> Path:
+    path = _ROOT / ".immortility"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "outcomes.db"
+
+
+def experience_dataset_path() -> Path:
+    path = _ROOT / ".immortility"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "experience_dataset.jsonl"
+
+
 def workflow_db_path() -> Path:
     return _ROOT / "workflow.db"
 

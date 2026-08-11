@@ -159,7 +159,21 @@ class WorkflowEngine:
         rag_context = context.get("rag_context", "")
 
         if step == WorkflowStep.PLANNING:
+            reflection_block = ""
+            try:
+                from knowledge.engine import KnowledgeEngine
+
+                ke = KnowledgeEngine()
+                proj_name = Path(proj_root).name if proj_root else ke.get_active_project_name()
+                refs = ke.list_reflections(project=proj_name or None, limit=8)
+                from knowledge.reflection_format import format_reflections_block
+
+                reflection_block = format_reflections_block(refs, goal=goal)
+            except Exception as exc:
+                logger.debug("reflection inject skipped: %s", exc)
             prompt = f"Create a step-by-step plan for: {goal}"
+            if reflection_block:
+                prompt += f"\n\n{reflection_block}"
             if rag_context:
                 prompt += f"\n\nProject context:\n{rag_context[:6000]}"
             plan = await agent_step("Planner", prompt)
@@ -198,8 +212,22 @@ class WorkflowEngine:
 
         if step == WorkflowStep.EDIT_PLANNER:
             if proj_root:
+                reflection_block = ""
+                try:
+                    from knowledge.engine import KnowledgeEngine
+
+                    ke = KnowledgeEngine()
+                    refs = ke.list_reflections(project=Path(proj_root).name, limit=5)
+                    from knowledge.reflection_format import format_reflections_block
+
+                    reflection_block = format_reflections_block(refs, goal=goal)
+                except Exception:
+                    reflection_block = ""
+                planner_context = rag_context
+                if reflection_block:
+                    planner_context = f"{reflection_block}\n\n{rag_context}"
                 planner = EditPlanner()
-                plan = await planner.generate_plan(goal, rag_context)
+                plan = await planner.generate_plan(goal, planner_context)
                 context["edit_plan"] = {
                     "goal": plan.goal,
                     "files_to_read": plan.files_to_read,
@@ -303,21 +331,46 @@ class WorkflowEngine:
                 result = context.get("coding_result", {})
                 verification = context.get("verification_results", {})
                 success = bool(result.get("success"))
+                reflection_text = str(context.get("reflection") or "")
+                details = result.get("message", "")
+                if reflection_text:
+                    details = f"{details}\nReflection: {reflection_text[:800]}".strip()
                 exp.record(
                     task=goal,
                     outcome="success" if success else "failure",
-                    details=result.get("message", ""),
+                    details=details,
                 )
                 # Phase 2: durable structured reflection in knowledge graph
                 from knowledge.engine import KnowledgeEngine
                 ke = KnowledgeEngine()
+                broke = "" if success else str(verification.get("details", result.get("message", "")))[:2000]
+                fixed = str(result.get("message", ""))[:2000] if success else ""
+                if reflection_text:
+                    if success:
+                        fixed = f"{fixed}\n{reflection_text[:1500]}".strip()
+                    else:
+                        broke = f"{broke}\n{reflection_text[:1500]}".strip()
                 ke.add_reflection(
                     task=goal,
-                    what_broke="" if success else str(verification.get("details", result.get("message", "")))[:2000],
-                    what_fixed_it=str(result.get("message", ""))[:2000] if success else "",
+                    what_broke=broke,
+                    what_fixed_it=fixed,
                     files_modified=list(result.get("files_modified", []) or context.get("files_modified", [])),
                     project=Path(proj_root).name if proj_root else None,
                 )
+                try:
+                    from core.self_reflection import reflect_and_store
+
+                    reflect_and_store(
+                        task=goal,
+                        tools_used=["coding_workflow"],
+                        result=str(result.get("message", "")),
+                        error="" if success else str(verification.get("details", "")),
+                        solution=str(result.get("message", "")) if success else "",
+                        success=success,
+                        project=Path(proj_root).name if proj_root else None,
+                    )
+                except Exception:
+                    pass
             except Exception as exc:
                 logger.debug("Experience update skipped: %s", exc)
             return True

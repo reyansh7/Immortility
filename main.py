@@ -1078,6 +1078,19 @@ async def main():
         user_lower = user_stripped.lower()
 
         try:
+            # Score previous turn (outcome learning) before handling this message
+            try:
+                from memory.outcome_memory import (
+                    get_outcome_memory,
+                    lessons_for_prompt,
+                    outcome_learning_enabled,
+                )
+
+                if outcome_learning_enabled():
+                    get_outcome_memory().score_and_record_previous(user_stripped)
+            except Exception:
+                pass
+
             # Learn user name from casual introductions
             try:
                 from memory.user_profile import UserProfile
@@ -1219,6 +1232,7 @@ async def main():
             # Fast conversational path: skip RAG/routing for short casual chat
             if _looks_like_fast_chat(user_stripped):
                 from core.config import get_config
+                from memory.outcome_memory import get_outcome_memory, lessons_for_prompt
 
                 state.mode = "CHAT"
                 state.save()
@@ -1231,16 +1245,22 @@ async def main():
                         for m in (state.conversation_history or [])[-6:]
                         if m.get("role") in {"user", "assistant"} and m.get("content")
                     ]
+                    extra = lessons_for_prompt(user_stripped)
                     response = await asyncio.to_thread(
                         fast_chat,
                         user_stripped,
                         history=hist,
+                        extra_context=extra,
                         max_output_tokens=get_config().cli_fast_chat_max_tokens,
                     )
                     state.append_message("user", user_stripped)
                     state.append_message("assistant", response)
                 console.print(Panel(Markdown(response), title="🧠 Immortility", border_style="cyan"))
                 await speak_reply(response)
+                try:
+                    get_outcome_memory().set_pending(user_stripped, "CHAT", response)
+                except Exception:
+                    pass
                 continue
 
             await auto_discover_and_open_project(user_stripped)
@@ -1271,10 +1291,53 @@ async def main():
                     engine = _get_engine()
                     # Context-first orchestration: retrieve once before intent routing.
                     orchestrated_context = engine.get_routing_context(user_stripped)
+                    from core.source_router import choose_source
+
+                    source_decision = choose_source(
+                        user_stripped, routing_context=orchestrated_context
+                    )
                     route = await classify_route(user_stripped, routing_context=orchestrated_context)
+
+                # Shared source policy: escalate to web research when needed
+                if source_decision.source == "WEB" and route in ("CHAT", "RESEARCH_TASK"):
+                    state.mode = "RESEARCH_TASK"
+                    state.save()
+                    console.print(
+                        f"\n[bold blue][WEB][/bold blue] [dim]{source_decision.reason}[/dim]"
+                    )
+                    from agents.research_agent import ResearchAgent
+                    from memory.outcome_memory import get_outcome_memory, lessons_for_prompt
+
+                    with console.status("[bold cyan]🔎 Researching...[/bold cyan]", spinner="bouncingBar"):
+                        ctx = await ResearchAgent().execute(user_stripped)
+                    answer = (ctx.summary or ctx.extracted_text or "No research results.")[:4000]
+                    try:
+                        from core.critic import apply_critic_or_retry
+
+                        answer = apply_critic_or_retry(
+                            user_stripped,
+                            answer,
+                            sources=list(ctx.urls or ctx.sources or []),
+                            mode="WEB",
+                        )
+                    except Exception:
+                        pass
+                    lessons = lessons_for_prompt(user_stripped)
+                    if lessons:
+                        answer = f"{answer}\n\n{lessons}"
+                    state.append_message("user", user_stripped)
+                    state.append_message("assistant", answer)
+                    console.print(Panel(Markdown(answer), title="🧠 Immortility", border_style="cyan"))
+                    await speak_reply(answer)
+                    try:
+                        get_outcome_memory().set_pending(user_stripped, "WEB", answer)
+                    except Exception:
+                        pass
+                    continue
 
                 if route == "CHAT":
                     from core.config import get_config
+                    from memory.outcome_memory import get_outcome_memory, lessons_for_prompt
 
                     state.mode = "CHAT"
                     state.save()
@@ -1288,6 +1351,9 @@ async def main():
                             extra = orchestrated_context[:1800]
                         elif memory:
                             extra = memory[:1200]
+                        lessons = lessons_for_prompt(user_stripped)
+                        if lessons:
+                            extra = f"{extra}\n\n{lessons}".strip()
                         hist = [
                             {"role": m["role"], "content": m["content"]}
                             for m in (state.conversation_history or [])[-6:]
@@ -1304,6 +1370,10 @@ async def main():
                         state.append_message("assistant", response)
                     console.print(Panel(Markdown(response), title="🧠 Immortility", border_style="cyan"))
                     await speak_reply(response)
+                    try:
+                        get_outcome_memory().set_pending(user_stripped, "CHAT", response)
+                    except Exception:
+                        pass
 
                 elif route == "ACTION":
                     state.mode = "ACTION"

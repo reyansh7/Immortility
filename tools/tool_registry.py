@@ -81,7 +81,18 @@ class ToolRegistry:
         self._setup_done = True
 
         self.register("open_url", BrowserTool.open_url, "Navigate browser to a URL", {"url": "string"})
-        self.register("search_google", SearchTool.search_google, "Search the web (Google/DuckDuckGo)", {"query": "string"})
+        self.register(
+            "search_google",
+            SearchTool.search_google,
+            "Search the live web (Tavily/Brave/SearXNG/DDG)",
+            {"query": "string"},
+        )
+        self.register(
+            "web_search",
+            SearchTool.web_search,
+            "Search the live web and return titled results with URLs",
+            {"query": "string"},
+        )
         self.register("scrape_page", ScraperTool.scrape_page, "Scrape HTML from URL or current page", {"url": "string (optional)"})
         self.register("get_current_url", BrowserTool.get_current_url, "Get current page URL", {})
         self.register("get_page_text", ScraperTool.get_page_text, "Extract readable text from current page", {})

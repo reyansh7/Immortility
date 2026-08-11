@@ -211,6 +211,30 @@ class KnowledgeEngine:
             project=project or self.get_active_project_name() or "",
         )
 
+    def list_reflections(
+        self, project: str | None = None, limit: int = 10
+    ) -> list[dict]:
+        """Return recent structured reflections for a project (or all)."""
+        proj = project if project is not None else (self.get_active_project_name() or "")
+        return self._kg_db.list_reflections(project=proj or "", limit=limit)
+
+    @staticmethod
+    def format_reflections_block(reflections: list[dict], goal: str = "", limit: int = 5) -> str:
+        from knowledge.reflection_format import format_reflections_block as _fmt
+
+        return _fmt(reflections, goal=goal, limit=limit)
+
+    def get_experience_context(self, query: str, limit: int = 3) -> str:
+        """Relevant past bug/fix experiences for prompt injection."""
+        try:
+            from memory.experience_memory import ExperienceMemory, format_experiences_block
+
+            entries = ExperienceMemory().get_relevant_experiences(query, limit=limit)
+            return format_experiences_block(entries, limit=limit)
+        except Exception as exc:
+            logger.debug("experience context skipped: %s", exc)
+            return ""
+
     def get_active_project(self) -> ProjectInfo | None:
         """Return the currently active project, or ``None``."""
         return self._project_manager.get_active_project()
@@ -374,9 +398,12 @@ class KnowledgeEngine:
             lines.append(f"{h.filename}:{h.start_line}-{h.end_line} :: {snippet[:220]}")
         graph = self.query_codebase_graph(query)
         learned = self.get_learned_context(query, n_results=3)
+        experiences = self.get_experience_context(query, limit=3)
         payload = "\n".join(lines[:n_results])
         if learned:
             payload = f"{payload}\n\nLearned memory:\n{learned}"
+        if experiences:
+            payload = f"{payload}\n\n{experiences}"
         if graph:
             payload = f"{payload}\n\nGraph:\n{graph}"
         self._log_event("routing_retrieval", query, payload)
@@ -403,8 +430,11 @@ class KnowledgeEngine:
             parts.append(f"Graph two-hop callers/callees for {multi_hop_query}:\n{two_hop}")
         payload = "\n\n".join(parts)
         learned = self.get_learned_context(query, n_results=3)
+        experiences = self.get_experience_context(query, limit=3)
         if learned:
             payload = f"{payload}\n\nLearned memory:\n{learned}"
+        if experiences:
+            payload = f"{payload}\n\n{experiences}"
         self._log_event("action_retrieval", query, payload)
         return payload[:9000]
 

@@ -281,6 +281,20 @@ async def execute_action(
     from core.repo_paths import get_repo_root
 
     cfg = get_config()
+    experience_block = ""
+    try:
+        from memory.experience_memory import ExperienceMemory, format_experiences_block
+
+        if user_input:
+            relevant = ExperienceMemory().get_relevant_experiences(user_input, limit=3)
+            experience_block = format_experiences_block(relevant)
+    except Exception:
+        experience_block = ""
+
+    ctx_for_prompt = context_override[:5000] if context_override else "No extra retrieved context provided."
+    if experience_block:
+        ctx_for_prompt = f"{ctx_for_prompt}\n\n{experience_block}"
+
     edit_mode_line = (
         "Execute real filesystem changes."
         if require_edits
@@ -301,11 +315,7 @@ async def execute_action(
         project_root=project_root or desktop,
         done_rule=done_rule,
         repo_root=str(get_repo_root()),
-        context_override=(
-            context_override[:5000]
-            if context_override
-            else "No extra retrieved context provided."
-        ),
+        context_override=ctx_for_prompt,
         framework_hints=get_framework_hints(project_root) or "- (none detected)",
         example_path=example_path,
         done_reason="verified changes" if require_edits else "analysis complete",
@@ -504,6 +514,18 @@ async def execute_action(
                 final_msg = args.get("message", "Done")
                 console.print(Panel(Markdown(final_msg), title="✅ Action Completed", border_style="green"))
                 state.append_message("assistant", f"Action completed: {final_msg}")
+                try:
+                    from core.self_reflection import reflect_from_action_result
+
+                    reflect_from_action_result(
+                        user_input or "",
+                        tools_executed=tools_executed,
+                        message=str(final_msg),
+                        success=True,
+                        project=Path(project_root).name if project_root else None,
+                    )
+                except Exception:
+                    pass
                 return final_msg
 
             if "path" in args:

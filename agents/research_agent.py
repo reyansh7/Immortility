@@ -138,45 +138,137 @@ class ResearchAgent:
         return None
 
     async def _research_generic(self, query: str) -> ResearchContext:
+        from agents.research_synth import ResearchSource, synthesize_with_citations
+
         search = await self._run_tool("search_google", {"query": query})
-        results = search.get("result", {}).get("results", [])
+        inner = search.get("result") or {}
+        if isinstance(inner, dict) and "results" in inner:
+            results = inner.get("results") or []
+        else:
+            results = search.get("results") or []
 
         if not results:
+            # Optional refined second query
+            refined = f"{query} overview documentation"
+            search2 = await self._run_tool("search_google", {"query": refined})
+            inner2 = search2.get("result") or {}
+            results = (inner2.get("results") if isinstance(inner2, dict) else None) or []
+
+        if not results:
+            synth = synthesize_with_citations(query, [])
             ctx = ResearchContext(
                 query=query,
-                sources=["Web Search"],
-                summary=f"No results for: {query}",
+                sources=[],
+                summary=synth.answer,
+                extracted_text=synth.answer,
             )
             self.state.set_research_context(ctx)
             return ctx
 
-        top_url = results[0].get("url", "")
-        console.print(f"[cyan]Browsing:[/cyan] {top_url}")
-        await self._run_tool("open_url", {"url": top_url})
-        text_result = await self._run_tool("get_page_text", {})
-        text = text_result.get("result", {}).get("text", "")
+        sources: list[ResearchSource] = []
+        urls: list[str] = []
+        texts: list[str] = []
+        max_pages = 3
+        for r in results[:max_pages]:
+            url = (r.get("url") or "").strip()
+            title = (r.get("title") or "").strip()
+            snippet = (r.get("snippet") or "").strip()
+            page_text = ""
+            if url:
+                try:
+                    console.print(f"[cyan]Reading:[/cyan] {url}")
+                    await self._run_tool("open_url", {"url": url})
+                    text_result = await self._run_tool("get_page_text", {})
+                    page_text = str(
+                        (text_result.get("result") or {}).get("text") or ""
+                    )[:4000]
+                except Exception as exc:
+                    console.print(f"[yellow]Skip {url}: {exc}[/yellow]")
+            sources.append(
+                ResearchSource(title=title, url=url, snippet=snippet, text=page_text)
+            )
+            if url:
+                urls.append(url)
+            if page_text:
+                texts.append(f"## {title}\nURL: {url}\n{page_text[:2500]}")
+            elif snippet:
+                texts.append(f"## {title}\nURL: {url}\n{snippet}")
 
-        sources = [r.get("url", "") for r in results[:5] if r.get("url")]
+        # Coverage check — refine once if thin
+        combined_len = sum(len(t) for t in texts)
+        if combined_len < 400 and results:
+            alt_q = f"{query} explained site:docs OR documentation"
+            search3 = await self._run_tool("search_google", {"query": alt_q})
+            inner3 = search3.get("result") or {}
+            extra = (inner3.get("results") if isinstance(inner3, dict) else None) or []
+            for r in extra[:2]:
+                url = (r.get("url") or "").strip()
+                if not url or url in urls:
+                    continue
+                snippet = (r.get("snippet") or "").strip()
+                sources.append(
+                    ResearchSource(
+                        title=r.get("title") or "",
+                        url=url,
+                        snippet=snippet,
+                        text=snippet,
+                    )
+                )
+                urls.append(url)
+                if snippet:
+                    texts.append(f"## {r.get('title')}\nURL: {url}\n{snippet}")
+
+        llm_answer = ""
+        try:
+            from core.llm import fast_chat
+
+            bundle = "\n\n".join(texts)[:7000]
+            llm_answer = fast_chat(
+                query,
+                extra_context=(
+                    "Synthesize an answer ONLY from these web sources. "
+                    "Include source URLs inline or in a Sources list. "
+                    "If sources are insufficient, say so — do not invent.\n\n"
+                    f"{bundle}"
+                ),
+                max_output_tokens=400,
+            )
+        except Exception:
+            llm_answer = ""
+
+        synth = synthesize_with_citations(query, sources, llm_answer=llm_answer)
+        answer = synth.answer
+        try:
+            from core.critic import apply_critic_or_retry
+
+            answer = apply_critic_or_retry(
+                query,
+                answer,
+                sources=synth.citations,
+                mode="WEB",
+            )
+        except Exception:
+            pass
         ctx = ResearchContext(
             query=query,
-            urls=[top_url] if top_url else [],
-            sources=sources or ["Web Search"],
-            extracted_text=text[:8000] if text else "\n".join(
-                f"{r.get('title')}: {r.get('snippet')}" for r in results[:5]
-            ),
-            summary=f"Research gathered from {len(results)} search results.",
+            urls=urls[:8],
+            sources=urls[:8] or ["Web Search"],
+            extracted_text="\n\n".join(texts)[:10000] or answer,
+            summary=answer,
         )
         self.state.set_research_context(ctx)
-        # Persist into TurboVec so later chats can retrieve this knowledge
         try:
             from knowledge.learner import remember_web_research
 
             remember_web_research(
                 query,
-                ctx.extracted_text[:6000] or ctx.summary,
+                synth.answer[:6000],
                 sources=list(ctx.sources or []),
             )
         except Exception:
             pass
-        console.print(f"[green]Research complete.[/green] {len(ctx.extracted_text)} chars collected.")
+        console.print(
+            f"[green]Research complete.[/green] "
+            f"{len(sources)} sources, {len(ctx.extracted_text)} chars."
+        )
         return ctx
