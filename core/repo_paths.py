@@ -81,3 +81,7 @@ def main_log_path() -> Path:
 
 def events_log_path() -> Path:
     return logs_dir() / "immortility_events.jsonl"
+
+
+def hud_todos_path() -> Path:
+    return memory_data_dir() / "hud_todos.json"

@@ -230,6 +230,56 @@ async def _verification_gate_on_done(
     )
 
 
+def _tool_call_sig(tool_name: str, args: dict | None) -> str:
+    try:
+        payload = json.dumps(args or {}, sort_keys=True, default=str)
+    except Exception:
+        payload = str(args)
+    return f"{tool_name}|{payload}"
+
+
+async def resume_confirmed_pending(pending: dict) -> str:
+    """Run a user-approved pending tool, then continue the loop with its result.
+
+    HUD used to execute the tool and resume *without* injecting the result, so the
+    model asked to run the same command again (yes/no loop).
+    """
+    tool_name = str((pending or {}).get("tool") or "")
+    args = (pending or {}).get("args") or {}
+    if not isinstance(args, dict):
+        args = {}
+
+    registry = ToolRegistry()
+    registry.setup()
+    result = await registry.execute(tool_name, args)
+    preview = result if isinstance(result, str) and len(result) < 2000 else str(result)[:2000]
+
+    resume_history = list((pending or {}).get("internal_history") or [])
+    resume_history.append(
+        {
+            "role": "user",
+            "content": (
+                f"Tool result: {preview}\n\n"
+                "This tool already ran successfully. Do NOT request the same tool/args again. "
+                "Next step? (JSON) If you can answer the user, call DONE with a plain-text report."
+            ),
+        }
+    )
+    tools_executed_init = list((pending or {}).get("tools_executed") or [])
+    if tool_name and tool_name not in tools_executed_init:
+        tools_executed_init.append(tool_name)
+
+    return await execute_action(
+        None,
+        require_edits=bool((pending or {}).get("require_edits", False)),
+        internal_history=resume_history,
+        tools_executed_init=tools_executed_init,
+        auto_confirm=False,
+        context_override=(pending or {}).get("context_override") or "",
+        skip_confirm_sigs={_tool_call_sig(tool_name, args)},
+    )
+
+
 async def execute_action(
     user_input: str | None = None,
     require_edits: bool = False,
@@ -237,10 +287,12 @@ async def execute_action(
     tools_executed_init: list | None = None,
     context_override: str = "",
     auto_confirm: bool = False,
+    skip_confirm_sigs: set[str] | None = None,
 ) -> str:
     """Action Engine: LLM tool loop with path normalization and DONE enforcement.
 
     auto_confirm=True skips yes/no prompts (CLI convenience only — HUD must stay False).
+    skip_confirm_sigs: tool+args already approved and executed this resume (do not re-prompt).
     """
     state = AgentState()
     registry = ToolRegistry()
@@ -305,7 +357,7 @@ async def execute_action(
         if require_edits
         else (
             "For analysis / bug-hunt / review / explain requests: gather enough evidence with "
-            "read_file/list_directory (or tree), then call DONE with a clear Markdown report in "
+            "read_file/list_directory (or tree), then call DONE with a clear plain-text report in "
             "args.message. Do NOT edit files. Do NOT keep reading forever — max ~8 reads then DONE."
         )
     )
@@ -354,6 +406,7 @@ async def execute_action(
         fallback_model = _detect_fallback_model(local_model())
     before_snapshots: dict[str, str] = {}
     identical_failures: dict[str, int] = {}
+    skip_confirm_sigs = set(skip_confirm_sigs or ())
 
     internal_history = list(internal_history) if internal_history else state.conversation_history[-8:].copy()
     if user_input:
@@ -381,13 +434,13 @@ async def execute_action(
         except Exception:
             summary_tokens = 700
         prompt = (
-            f"You analyzed a codebase via tools. Write a clear Markdown report for {who}.\n"
+            f"You analyzed a codebase via tools. Write a clear plain-text report for {who}.\n"
             f"Original request: {user_input or '(analysis)'}\n"
             f"Stop reason: {reason}\n\n"
             "Tool evidence:\n"
             f"{bundle}\n\n"
             "Include: what the folder/module is for, key files, how pieces connect, "
-            "and any obvious issues. Be concrete. No tool JSON."
+            "and any obvious issues. Be concrete. No markdown bold, headings, or tool JSON."
         )
         try:
             response = await asyncio.to_thread(
@@ -396,7 +449,10 @@ async def execute_action(
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are Immortility. Summarize code investigation results briefly and clearly.",
+                        "content": (
+                            "You are Immortility. Summarize code investigation results "
+                            "briefly in plain text. No **bold**, no # headings."
+                        ),
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -406,6 +462,12 @@ async def execute_action(
             )
             summary = (response.get("message") or {}).get("content") or ""
             summary = str(summary).strip()
+            try:
+                from core.reply_format import polish_reply
+
+                summary = polish_reply(summary)
+            except Exception:
+                pass
         except Exception as exc:
             summary = (
                 f"Gathered notes from {successful_lookups} lookups "
@@ -512,6 +574,12 @@ async def execute_action(
                         )
                         continue
                 final_msg = args.get("message", "Done")
+                try:
+                    from core.reply_format import polish_reply
+
+                    final_msg = polish_reply(str(final_msg))
+                except Exception:
+                    final_msg = str(final_msg)
                 console.print(Panel(Markdown(final_msg), title="✅ Action Completed", border_style="green"))
                 state.append_message("assistant", f"Action completed: {final_msg}")
                 try:
@@ -544,7 +612,7 @@ async def execute_action(
                     else:
                         err = (
                             f"You already read '{path}'. "
-                            "Read a different file, or call DONE with your Markdown findings now."
+                            "Read a different file, or call DONE with your findings now."
                         )
                     console.print(f"[yellow]{err}[/yellow]")
                     internal_history.append({"role": "user", "content": err})
@@ -558,6 +626,20 @@ async def execute_action(
                     console.print(f"[red]{err}[/red]")
                     internal_history.append({"role": "user", "content": err})
                     continue
+
+            call_sig = _tool_call_sig(tool_name, args)
+            if call_sig in skip_confirm_sigs:
+                internal_history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You already ran this exact tool call; the Tool result is already "
+                            "in the conversation. Call DONE with a plain-text answer. "
+                            "Do not request the same tool again."
+                        ),
+                    }
+                )
+                continue
 
             if needs_confirmation(tool_name, args) and not auto_confirm:
                 state.pending_action = {
@@ -623,6 +705,7 @@ async def execute_action(
             else:
                 no_progress = 0
                 last_error = ""
+                skip_confirm_sigs.add(call_sig)
 
             preview = result if isinstance(result, str) and len(result) < 2000 else str(result)[:2000]
             console.print(f"[green]Result:[/green] {preview[:400]}...")
@@ -639,7 +722,7 @@ async def execute_action(
                 nudge = (
                     "\n\nCRITICAL: You already have enough evidence "
                     f"({successful_lookups} lookups, {len(files_read)} files). "
-                    "Your NEXT response MUST be tool DONE with a Markdown report in args.message. "
+                    "Your NEXT response MUST be tool DONE with a plain-text report in args.message. "
                     "Do NOT read or list anything else."
                 )
             internal_history.append(

@@ -415,8 +415,7 @@ def handle_hud_request(
                 state.save()
 
                 async def _resume() -> str:
-                    from tools.tool_registry import ToolRegistry
-                    from core.action_engine import execute_action
+                    from core.action_engine import resume_confirmed_pending
 
                     try:
                         from rich.console import Console
@@ -427,18 +426,7 @@ def handle_hud_request(
                         )
                     except Exception:
                         pass
-                    registry = ToolRegistry()
-                    registry.setup()
-                    await registry.execute(pending["tool"], pending["args"])
-                    # Continue loop; further mutators still require confirm
-                    return await execute_action(
-                        None,
-                        require_edits=pending.get("require_edits", False),
-                        internal_history=pending.get("internal_history"),
-                        tools_executed_init=pending.get("tools_executed"),
-                        auto_confirm=False,
-                        context_override=pending.get("context_override") or "",
-                    )
+                    return await resume_confirmed_pending(pending)
 
                 return _run_async(_resume()) or "Done."
             if is_rejection(message):
@@ -618,9 +606,9 @@ def handle_hud_request(
             vs = stats.get("vector_store") or {}
             return (
                 f"Indexed Immortility into the local vector DB.\n"
-                f"- Path: `{info.get('path')}`\n"
-                f"- Code chunks now: **{vs.get('total_chunks', '?')}**\n"
-                f"Ask me to **read knowledge** or **analyze your vector database** anytime."
+                f"- Path: {info.get('path')}\n"
+                f"- Code chunks now: {vs.get('total_chunks', '?')}\n"
+                f"Ask me to read knowledge or analyze your vector database anytime."
             )
         except Exception as exc:
             logger.exception("self-index failed")
@@ -791,7 +779,7 @@ def handle_hud_request(
                     f"re-embed it, then ask me again."
                 )
             project_note = (
-                f"Reyansh is asking about project `{mentioned}` "
+                f"Reyansh is asking about project {mentioned} "
                 f"({ppath or 'Desktop/Projects'}), which has {chunks} TurboVec chunks. "
                 f"Answer from retrieved code context about THIS project only — "
                 f"not a generic stock-trading app."

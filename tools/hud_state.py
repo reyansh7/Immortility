@@ -12,6 +12,7 @@ _hud_state: dict[str, Any] = {
     "status": "ALL SUBSYSTEMS NOMINAL",
     "sync": "SYNCED",
     "face": "idle",
+    "ollama_latency_ms": None,
 }
 
 

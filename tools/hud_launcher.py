@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 HUD_HTML = Path(__file__).resolve().parent.parent / "frontend" / "immortility_hud.html"
 HUD_PORT = 8765
-HUD_WIDTH = 1000
-HUD_HEIGHT = 780
+HUD_WIDTH = 1440
+HUD_HEIGHT = 900
 
 _chat_history: list[dict[str, str]] = []
 _history_lock = threading.Lock()
@@ -33,6 +33,8 @@ _last_chat_reply = ""
 _last_chat_at = 0.0
 _chat_dedupe_lock = threading.Lock()
 _hud_token: str = ""
+_due_stop = threading.Event()
+_chat_cancel = threading.Event()
 
 __all__ = [
     "open_hud",
@@ -82,7 +84,10 @@ class _HudHandler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         # Same-origin local HUD only
         self.send_header("Access-Control-Allow-Origin", f"http://127.0.0.1:{HUD_PORT}")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, PATCH, DELETE, OPTIONS",
+        )
         self.send_header(
             "Access-Control-Allow-Headers",
             "Content-Type, X-Immortility-Token, Authorization",
@@ -155,7 +160,56 @@ class _HudHandler(BaseHTTPRequestHandler):
             self._json(200, {"messages": hist, "greeting": _GREETING})
             return
 
+        if path == "/api/stats":
+            if not _check_token(self):
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                from tools.hud_vitals import get_cached_stats
+
+                self._json(200, get_cached_stats())
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/todos":
+            if not _check_token(self):
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                from tools.hud_todos import list_todos
+
+                self._json(200, {"todos": list_todos()})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/events":
+            if not _check_token(self):
+                self._json(401, {"error": "unauthorized"})
+                return
+            qs = urlparse(self.path).query
+            limit = 40
+            for part in qs.split("&"):
+                if part.startswith("limit="):
+                    try:
+                        limit = max(1, min(200, int(part.split("=", 1)[1])))
+                    except ValueError:
+                        pass
+            self._json(200, {"events": _tail_events(limit)})
+            return
+
         self.send_error(404)
+
+    def _read_json_body(self) -> dict[str, Any] | None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(raw.decode("utf-8") or "{}")
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            self._json(400, {"error": "invalid json"})
+            return None
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -163,8 +217,10 @@ class _HudHandler(BaseHTTPRequestHandler):
             "/hud/chat",
             "/hud/listen",
             "/hud/listen/cancel",
+            "/hud/stop",
             "/hud/face",
             "/hud/confirm",
+            "/api/todos",
         }:
             self.send_error(404)
             return
@@ -172,12 +228,8 @@ class _HudHandler(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized — restart Immortility HUD"})
             return
 
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b"{}"
-        try:
-            data = json.loads(raw.decode("utf-8") or "{}")
-        except json.JSONDecodeError:
-            self._json(400, {"error": "invalid json"})
+        data = self._read_json_body()
+        if data is None:
             return
 
         if path == "/hud/chat":
@@ -192,11 +244,89 @@ class _HudHandler(BaseHTTPRequestHandler):
         if path == "/hud/listen/cancel":
             self._handle_listen_cancel()
             return
+        if path == "/hud/stop":
+            self._handle_stop()
+            return
+        if path == "/api/todos":
+            text = str(data.get("text") or "").strip()
+            if not text:
+                self._json(400, {"error": "text required"})
+                return
+            due_at = data.get("due_at")
+            due_at = str(due_at).strip() if due_at else None
+            try:
+                from tools.hud_todos import create_todo
+
+                item = create_todo(text, due_at=due_at)
+                self._json(200, {"ok": True, "todo": item})
+            except Exception as exc:
+                self._json(500, {"error": str(exc)})
+            return
         if path == "/hud/face":
             mode = str(data.get("face") or data.get("mode") or "idle")
             set_face(mode)
             self._json(200, {"ok": True, "face": get_hud_state().get("face")})
             return
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path != "/api/todos":
+            self.send_error(404)
+            return
+        if not _check_token(self):
+            self._json(401, {"error": "unauthorized"})
+            return
+        data = self._read_json_body()
+        if data is None:
+            return
+        todo_id = str(data.get("id") or "").strip()
+        if not todo_id:
+            self._json(400, {"error": "id required"})
+            return
+        try:
+            from tools.hud_todos import patch_todo
+
+            item = patch_todo(
+                todo_id,
+                done=data.get("done"),
+                due_fired=data.get("due_fired"),
+                text=data.get("text"),
+            )
+            if not item:
+                self._json(404, {"error": "not found"})
+                return
+            self._json(200, {"ok": True, "todo": item})
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path != "/api/todos":
+            self.send_error(404)
+            return
+        if not _check_token(self):
+            self._json(401, {"error": "unauthorized"})
+            return
+        qs = urlparse(self.path).query
+        todo_id = ""
+        for part in qs.split("&"):
+            if part.startswith("id="):
+                todo_id = part.split("=", 1)[1].strip()
+        if not todo_id:
+            data = self._read_json_body()
+            if data is None:
+                return
+            todo_id = str(data.get("id") or "").strip()
+        if not todo_id:
+            self._json(400, {"error": "id required"})
+            return
+        try:
+            from tools.hud_todos import delete_todo
+
+            ok = delete_todo(todo_id)
+            self._json(200 if ok else 404, {"ok": ok})
+        except Exception as exc:
+            self._json(500, {"error": str(exc)})
 
     def _handle_confirm(self, data: dict[str, Any]) -> None:
         decision = str(data.get("decision") or "").strip().lower()
@@ -214,15 +344,28 @@ class _HudHandler(BaseHTTPRequestHandler):
 
         global _last_chat_key, _last_chat_reply, _last_chat_at
 
+        _chat_cancel.clear()
         message = str(data.get("message") or "").strip()
         if not message:
             self._json(400, {"error": "empty message"})
             return
 
         key = message.lower()
+        # Never collapse yes/no — confirmations must re-enter the pending-action path.
+        try:
+            from core.pending_action import is_approval, is_rejection
+
+            confirm_msg = is_approval(message) or is_rejection(message)
+        except Exception:
+            confirm_msg = key in {"yes", "no", "y", "n"}
         with _chat_dedupe_lock:
             now = time.time()
-            if key == _last_chat_key and (now - _last_chat_at) < 4.0 and _last_chat_reply:
+            if (
+                not confirm_msg
+                and key == _last_chat_key
+                and (now - _last_chat_at) < 4.0
+                and _last_chat_reply
+            ):
                 self._json(200, {"reply": _last_chat_reply, "deduped": True})
                 return
 
@@ -245,12 +388,23 @@ class _HudHandler(BaseHTTPRequestHandler):
             from tools.hud_agent import handle_hud_request
 
             reply = handle_hud_request(message, history=history_snapshot)
+            try:
+                from core.reply_format import polish_reply
+
+                reply = polish_reply(reply or "")
+            except Exception:
+                pass
         except Exception as exc:
             logger.exception("HUD chat failed")
             reply = f"Sorry Reyansh — I hit an error: {exc}"
             set_face("idle")
             _term(f"Error: {exc}", "red")
             self._json(200, {"reply": reply, "error": str(exc)})
+            return
+
+        if _chat_cancel.is_set():
+            set_face("idle")
+            self._json(200, {"reply": "", "cancelled": True})
             return
 
         needs_confirm = False
@@ -343,6 +497,23 @@ class _HudHandler(BaseHTTPRequestHandler):
             pass
         set_face("idle")
         self._json(200, {"ok": True, "cancelled": True})
+
+    def _handle_stop(self) -> None:
+        """Cancel listen + TTS; flag in-flight chat clients to abort via fetch."""
+        _chat_cancel.set()
+        try:
+            from tools.voice_io import get_voice
+
+            voice = get_voice()
+            voice.cancel_listen()
+            try:
+                voice.stop_speaking()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        set_face("idle")
+        self._json(200, {"ok": True, "stopped": True})
 
     def _handle_listen(self, data: dict[str, Any]) -> None:
         try:
@@ -449,6 +620,55 @@ def _voice_summarize(text: str) -> str:
         return text[:160]
 
 
+def _tail_events(limit: int = 40) -> list[dict[str, Any]]:
+    """Tail structured lines from immortility_events.jsonl (empty if missing)."""
+    try:
+        from core.repo_paths import events_log_path
+
+        path = events_log_path()
+    except Exception:
+        return []
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                out.append(obj)
+            else:
+                out.append({"message": str(obj), "level": "info"})
+        except json.JSONDecodeError:
+            out.append({"message": line[:300], "level": "info"})
+    return out
+
+
+def _due_checker_loop() -> None:
+    while not _due_stop.is_set():
+        try:
+            from tools.hud_todos import fire_due_todos
+
+            fired = fire_due_todos()
+            if fired:
+                from tools.hud_notify import notify_reminder
+
+                for item in fired:
+                    text = str(item.get("text") or "Reminder").strip() or "Reminder"
+                    # OS toast from Immortility process — works even if HUD is minimized.
+                    notify_reminder("Immortility reminder", text)
+                    _term(f"Due reminder: {text[:120]}", "yellow")
+        except Exception:
+            pass
+        _due_stop.wait(15.0)
+
+
 def seed_greeting() -> None:
     with _history_lock:
         if _chat_history:
@@ -484,6 +704,15 @@ def start_hud_server(port: int = HUD_PORT) -> str:
 
     seed_greeting()
     token = get_hud_token()
+    try:
+        from tools.hud_vitals import start_stats_sampler
+
+        start_stats_sampler()
+    except Exception as exc:
+        logger.warning("HUD stats sampler failed to start: %s", exc)
+    _due_stop.clear()
+    threading.Thread(target=_due_checker_loop, name="hud-due", daemon=True).start()
+
     server = ThreadingHTTPServer(("127.0.0.1", port), _HudHandler)
     _server = server
     thread = threading.Thread(target=server.serve_forever, name="immortility-hud", daemon=True)
@@ -570,6 +799,7 @@ def open_hud(*, port: int = HUD_PORT, greet: bool = True) -> str:
 
 def stop_hud_server() -> None:
     global _server
+    _due_stop.set()
     if _server is not None:
         try:
             _server.shutdown()

@@ -1,0 +1,13 @@
+# Optional Immortility trial — Qwythos-9B Q4_K_M (not daily driver).
+# Pull first: ollama pull hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M
+# Then: ollama create qwythos9b-q4 -f scripts/ollama/Modelfile.qwythos9b-q4
+#
+# Keep num_ctx modest on 8GB VRAM. Do not set 1M context.
+
+FROM hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M
+
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
+PARAMETER num_ctx 8192

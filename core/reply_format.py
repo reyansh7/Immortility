@@ -15,13 +15,15 @@ def reply_format_rules(user_name: str | None = None) -> str:
         except Exception:
             name = "the user"
     return (
-        "Default answer shape: one short opening paragraph, then a short bullet list "
+        "Write like a person talking in chat: short sentences, plain text. "
+        "Default shape: one short opening paragraph, then a short bullet list "
         "using lines that start with '- ' for the key points. "
         f"If {name} asks for only points / bullets / a list, use bullets with no paragraph. "
         "If they ask for paragraph only / prose only / no bullets, use paragraphs with no list. "
-        "Do not use markdown bold or italic (no ** **, no __ __, no *emphasis*). "
-        "Do not use # headings or ``` fences unless they ask for code. "
-        "Do not dump lists of Medium/blog links unless they explicitly ask for web resources. "
+        "Never use markdown: no **bold**, no *italic*, no __underline__, no # headings, "
+        "no ``` fences unless they explicitly asked for a code block. "
+        "Do not wrap names in asterisks. Do not dump lists of Medium/blog links unless they "
+        "explicitly ask for web resources. "
         "When continuing a project they already discussed, give concrete next steps for THAT "
         "project — stay consistent with the earlier plan. "
         "Write clean plain text that looks good in the HUD chat."
@@ -37,8 +39,11 @@ except Exception:
 
 _BOLD_STAR = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _BOLD_UNDER = re.compile(r"__(.+?)__", re.DOTALL)
+_ITALIC_STAR = re.compile(r"(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)")
 _HEADING = re.compile(r"(?m)^#{1,6}\s+")
 _MD_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_FENCE = re.compile(r"```[\w+-]*\n?")
+_INLINE_CODE = re.compile(r"`([^`]+)`")
 
 
 def polish_reply(text: str) -> str:
@@ -50,7 +55,10 @@ def polish_reply(text: str) -> str:
     out = _BOLD_STAR.sub(r"\1", out)
     out = _BOLD_UNDER.sub(r"\1", out)
     out = _HEADING.sub("", out)
+    out = _ITALIC_STAR.sub(r"\1", out)
+    out = _FENCE.sub("", out)
+    out = out.replace("```", "")
+    out = _INLINE_CODE.sub(r"\1", out)
     out = out.replace("**", "")
-    # Soften numbered "1. **Title**" leftovers after bold strip
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()

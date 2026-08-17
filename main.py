@@ -327,36 +327,24 @@ async def handle_pending_action(user_input: str) -> bool:
     if is_approval(user_input):
         pending = state.pending_action
         tool_name = pending["tool"]
-        args = pending["args"]
-        require_edits = pending.get("require_edits", False)
-        resume_history = pending.get("internal_history")
         console.print(f"\n[cyan]Confirmed — executing:[/cyan] {tool_name}")
 
-        result = await registry.execute(tool_name, args)
-        console.print(f"[green]Result:[/green] {result[:500]}")
-
         state.pending_action = None
+        state.save()
         if pending.get("workflow") == "leetcode" or (
             state.current_task and state.current_task.get("workflow") == "leetcode"
         ):
+            result = await registry.execute(tool_name, pending.get("args") or {})
+            console.print(f"[green]Result:[/green] {str(result)[:500]}")
             state.current_task = state.current_task or {}
             state.current_task["step"] = "Complete"
             state.save()
             console.print("[bold green]LeetCode solution saved to desktop.[/bold green]")
             return True
 
-        if resume_history:
-            resume_history = list(resume_history)
-            resume_history.append({
-                "role": "user",
-                "content": f"Tool result: {result}\n\nNext step? (JSON)",
-            })
-        tools_executed_init = pending.get("tools_executed", [])
-        await execute_action(
-            require_edits=require_edits, 
-            internal_history=resume_history,
-            tools_executed_init=tools_executed_init
-        )
+        from core.action_engine import resume_confirmed_pending
+
+        await resume_confirmed_pending(pending)
         return True
 
     if is_rejection(user_input):

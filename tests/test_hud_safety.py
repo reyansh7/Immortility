@@ -48,3 +48,45 @@ def test_repo_paths_are_absolute_under_immortility():
     assert root.name.lower().startswith("immortility")
     assert state_file_path().parent == root
     assert vector_db_dir().parent == root
+
+
+def test_resume_confirmed_pending_injects_tool_result():
+    """Yes after confirm must feed the command output back into the action loop."""
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, patch
+
+    from core.action_engine import resume_confirmed_pending
+
+    pending = {
+        "tool": "run_command",
+        "args": {"cmd": "tasklist"},
+        "internal_history": [
+            {"role": "user", "content": "what's running"},
+            {"role": "assistant", "content": '{"tool":"run_command","args":{"cmd":"tasklist"}}'},
+        ],
+        "tools_executed": [],
+        "require_edits": False,
+        "context_override": "",
+    }
+    tool_json = json.dumps(
+        {"status": "success", "stdout": "notepad.exe  1234", "returncode": 0}
+    )
+
+    async def fake_execute(*_a, **kwargs):
+        history = kwargs.get("internal_history") or []
+        blob = " ".join(str(m.get("content")) for m in history)
+        assert "notepad.exe" in blob
+        assert "already ran" in blob.lower() or "Tool result:" in blob
+        assert kwargs.get("skip_confirm_sigs")
+        return "notepad.exe (PID 1234) is running."
+
+    with patch("core.action_engine.ToolRegistry.setup", lambda self: None), patch(
+        "core.action_engine.ToolRegistry.execute",
+        new=AsyncMock(return_value=tool_json),
+    ), patch(
+        "core.action_engine.execute_action",
+        new=AsyncMock(side_effect=fake_execute),
+    ):
+        out = asyncio.run(resume_confirmed_pending(pending))
+    assert "notepad.exe" in out

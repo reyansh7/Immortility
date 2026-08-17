@@ -19,3 +19,14 @@ def test_polish_strips_bold():
 def test_polish_keeps_paragraph_and_bullets():
     text = "Hello Reyansh, here is the project.\n\n- One\n- Two"
     assert polish_reply(text) == text
+
+
+def test_polish_strips_headings_fences_and_inline_code():
+    raw = "### Title\nThe `urls.py` helper.\n```python\ndef foo():\n    return 1\n```"
+    out = polish_reply(raw)
+    assert "**" not in out
+    assert "###" not in out
+    assert "```" not in out
+    assert "`" not in out
+    assert "urls.py" in out
+    assert "def foo():" in out

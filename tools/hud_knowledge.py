@@ -193,8 +193,8 @@ def _index_single(path: Path, *, force: bool = False) -> str:
             f"{existing} chunks - skipping (say 'reindex' to force)."
         )
         return (
-            f"`{path}` is already in TurboVec (**{existing}** chunks). "
-            f"Say **reindex {path.name}** or `/open {path}` with **force/reindex** "
+            f"{path} is already in TurboVec ({existing} chunks). "
+            f"Say reindex {path.name} or /open {path} with force/reindex "
             f"if you want a fresh pass."
         )
 
@@ -233,10 +233,10 @@ def _index_single(path: Path, *, force: bool = False) -> str:
         f"{result.total_chunks} chunks in {elapsed:.1f}s"
     )
     return (
-        f"Indexed `{path}` into TurboVec.\n\n"
-        f"**Done in {elapsed:.1f}s** (estimate was {_format_duration(eta)}).\n\n"
-        f"**{result.name}**: {result.total_files} files → "
-        f"**{result.total_chunks}** chunks"
+        f"Indexed {path} into TurboVec.\n\n"
+        f"Done in {elapsed:.1f}s (estimate was {_format_duration(eta)}).\n\n"
+        f"{result.name}: {result.total_files} files → "
+        f"{result.total_chunks} chunks"
         + (f" ({result.language}/{result.framework})" if result.language else "")
         + "."
     )
@@ -319,35 +319,35 @@ def _index_many(
         pass
 
     lines = [
-        f"Got it Reyansh — indexed **{label}** into TurboVec.",
-        f"**Finished in {elapsed:.1f}s** (ETA was {_format_duration(eta)}).",
+        f"Got it Reyansh — indexed {label} into TurboVec.",
+        f"Finished in {elapsed:.1f}s (ETA was {_format_duration(eta)}).",
         "",
-        f"### This run",
-        f"- Newly indexed projects: **{report.total_projects}**",
-        f"- Skipped (already had chunks): **{len(report.skipped_projects)}**",
-        f"- Files touched: **{report.total_files}**",
-        f"- New/updated chunks: **{report.total_chunks}**",
-        f"- TurboVec total chunks now: **{total_chunks_db}**",
+        "This run",
+        f"- Newly indexed projects: {report.total_projects}",
+        f"- Skipped (already had chunks): {len(report.skipped_projects)}",
+        f"- Files touched: {report.total_files}",
+        f"- New/updated chunks: {report.total_chunks}",
+        f"- TurboVec total chunks now: {total_chunks_db}",
         "",
-        "### Per project",
+        "Per project",
         "",
     ]
     for r in report.projects:
         if r.skipped:
             lines.append(
-                f"- **{r.name}** — skipped (already indexed, {r.total_chunks} chunks)"
+                f"- {r.name} — skipped (already indexed, {r.total_chunks} chunks)"
             )
         elif r.error:
-            lines.append(f"- **{r.name}** — FAILED: {r.error}")
+            lines.append(f"- {r.name} — FAILED: {r.error}")
         else:
             lines.append(
-                f"- **{r.name}** — {r.total_files} files → {r.total_chunks} chunks "
+                f"- {r.name} — {r.total_files} files → {r.total_chunks} chunks "
                 f"({r.time_seconds:.1f}s)"
                 + (f" [{r.language}/{r.framework}]" if r.language or r.framework else "")
             )
 
     lines.append("")
-    lines.append("### Quick understanding (post-index)")
+    lines.append("Quick understanding (post-index)")
     lines.append("")
     try:
         from core.desktop_scanner import summarize_folder
@@ -355,11 +355,11 @@ def _index_many(
         for root in roots[:16]:
             try:
                 detail = summarize_folder(root)
-                lines.append(f"- **{root.name}**: {detail}")
+                lines.append(f"- {root.name}: {detail}")
             except Exception:
-                lines.append(f"- **{root.name}**: indexed")
+                lines.append(f"- {root.name}: indexed")
     except Exception as exc:
-        lines.append(f"_Summary skim failed: {exc}_")
+        lines.append(f"Summary skim failed: {exc}")
 
     lines.append("")
     lines.append(
@@ -386,13 +386,13 @@ def handle_hud_knowledge(message: str) -> str | None:
         path = _resolve_open_path(msg)
         if _is_slash_open(msg) and path is None:
             return (
-                "Usage: `/open <folder-path>` — I index that folder into TurboVec "
-                "(real RAG ingest), I do **not** only list names.\n"
+                "Usage: /open <folder-path> — I index that folder into TurboVec "
+                "(real RAG ingest), I do not only list names.\n"
                 "Examples:\n"
-                "- `/open C:\\Users\\reyan\\OneDrive\\Desktop\\immortility1`\n"
-                "- `/open C:\\Users\\reyan\\OneDrive\\Desktop\\Projects` "
+                "- /open C:\\Users\\reyan\\OneDrive\\Desktop\\immortility1\n"
+                "- /open C:\\Users\\reyan\\OneDrive\\Desktop\\Projects "
                 "(indexes every project inside)\n"
-                "- Or say: **index my desktop projects** / **read the projects**"
+                "- Or say: index my desktop projects / read the projects"
             )
         if path and path.is_dir():
             if _is_projects_container(path) or path.name.lower() == "projects":

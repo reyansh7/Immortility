@@ -21,12 +21,24 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from core.reply_format import polish_reply
 
 logger = logging.getLogger(__name__)
+
+
+def _record_hud_latency(started: float) -> None:
+    """Store last LLM RTT for the HUD LATENCY vital (local or Gemini)."""
+    try:
+        ms = int(max(0.0, (time.perf_counter() - started) * 1000))
+        from tools.hud_state import update_hud
+
+        update_hud(ollama_latency_ms=ms)
+    except Exception:
+        pass
 
 _DOTENV_LOADED = False
 _gemini_client: Any = None
@@ -554,6 +566,7 @@ def chat(
 ) -> dict[str, Any]:
     """Provider-agnostic chat. Gemini when configured; else OpenAI-compatible local."""
     del think  # unused — kept for call-site compatibility
+    t0 = time.perf_counter()
     messages = messages or []
     fmt = kwargs.pop("format", None)
     json_mode = fmt == "json"
@@ -569,76 +582,79 @@ def chat(
 
     local_kwargs = dict(kwargs)
 
-    if provider in {"gemini", "google"}:
-        gemini_error: Exception | None = None
-        try:
-            result = _chat_gemini(
-                messages,
-                model=model if "gemini" in str(model).lower() else None,
-                json_mode=bool(json_mode),
-                max_output_tokens=max_output_tokens,
-                temperature=float(temperature) if temperature is not None else 0.4,
-            )
-            logger.debug("LLM via Gemini (%s)", _gemini_model())
-            return result
-        except Exception as exc:
-            gemini_error = exc
-            err_l = str(exc).lower()
-            quota_hit = "429" in err_l or "resource_exhausted" in err_l or "quota" in err_l
-            if not quota_hit:
-                current = _gemini_model()
-                try:
-                    from core.config import get_config
-
-                    alts = list(get_config().gemini_fallback_models)
-                except Exception:
-                    alts = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
-                alt = next((a for a in alts if a != current), None)
-                if alt:
+    try:
+        if provider in {"gemini", "google"}:
+            gemini_error: Exception | None = None
+            try:
+                result = _chat_gemini(
+                    messages,
+                    model=model if "gemini" in str(model).lower() else None,
+                    json_mode=bool(json_mode),
+                    max_output_tokens=max_output_tokens,
+                    temperature=float(temperature) if temperature is not None else 0.4,
+                )
+                logger.debug("LLM via Gemini (%s)", _gemini_model())
+                return result
+            except Exception as exc:
+                gemini_error = exc
+                err_l = str(exc).lower()
+                quota_hit = "429" in err_l or "resource_exhausted" in err_l or "quota" in err_l
+                if not quota_hit:
+                    current = _gemini_model()
                     try:
-                        logger.warning("Gemini %s failed (%s); retry %s", current, exc, alt)
-                        return _chat_gemini(
-                            messages,
-                            model=alt,
-                            json_mode=bool(json_mode),
-                            max_output_tokens=max_output_tokens,
-                            temperature=float(temperature) if temperature is not None else 0.4,
-                        )
-                    except Exception as exc2:
-                        gemini_error = exc2
-                        logger.warning("Gemini retry failed (%s); falling back to local", exc2)
-                else:
-                    logger.warning("Gemini failed (%s); falling back to local", exc)
-            else:
-                logger.warning("Gemini quota/rate-limit (%s); falling back to local", exc)
-        try:
-            return _chat_openai_compat(
-                messages,
-                model=None,
-                provider=_local_provider_name(),
-                json_mode=bool(json_mode),
-                max_output_tokens=max_output_tokens,
-                temperature=temperature,
-                **local_kwargs,
-            )
-        except Exception as local_exc:
-            raise RuntimeError(
-                f"Gemini unavailable ({gemini_error}); "
-                f"local OpenAI-compatible fallback failed ({local_exc})"
-            ) from local_exc
+                        from core.config import get_config
 
-    # Force local OpenAI-compatible path
-    local_p = provider if provider in {"vllm", "ollama", "openai"} else _local_provider_name()
-    explicit = None if _is_placeholder_model(str(model) if model else None) else str(model)
-    return _chat_openai_compat(
-        messages,
-        model=explicit,
-        provider=local_p,
-        json_mode=bool(json_mode),
-        max_output_tokens=max_output_tokens,
-        temperature=temperature,
-        **local_kwargs,
-    )
+                        alts = list(get_config().gemini_fallback_models)
+                    except Exception:
+                        alts = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
+                    alt = next((a for a in alts if a != current), None)
+                    if alt:
+                        try:
+                            logger.warning("Gemini %s failed (%s); retry %s", current, exc, alt)
+                            return _chat_gemini(
+                                messages,
+                                model=alt,
+                                json_mode=bool(json_mode),
+                                max_output_tokens=max_output_tokens,
+                                temperature=float(temperature) if temperature is not None else 0.4,
+                            )
+                        except Exception as exc2:
+                            gemini_error = exc2
+                            logger.warning("Gemini retry failed (%s); falling back to local", exc2)
+                    else:
+                        logger.warning("Gemini failed (%s); falling back to local", exc)
+                else:
+                    logger.warning("Gemini quota/rate-limit (%s); falling back to local", exc)
+            try:
+                return _chat_openai_compat(
+                    messages,
+                    model=None,
+                    provider=_local_provider_name(),
+                    json_mode=bool(json_mode),
+                    max_output_tokens=max_output_tokens,
+                    temperature=temperature,
+                    **local_kwargs,
+                )
+            except Exception as local_exc:
+                raise RuntimeError(
+                    f"Gemini unavailable ({gemini_error}); "
+                    f"local OpenAI-compatible fallback failed ({local_exc})"
+                ) from local_exc
+
+        # Force local OpenAI-compatible path
+        local_p = provider if provider in {"vllm", "ollama", "openai"} else _local_provider_name()
+        explicit = None if _is_placeholder_model(str(model) if model else None) else str(model)
+        return _chat_openai_compat(
+            messages,
+            model=explicit,
+            provider=local_p,
+            json_mode=bool(json_mode),
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+            **local_kwargs,
+        )
+    finally:
+        _record_hud_latency(t0)
 
 
 def _fast_system_prompt() -> str:
