@@ -266,3 +266,82 @@ def test_hud_and_cli_wire_the_coding_loop():
     assert "run_coding_loop" in hud
     assert "auto_confirm=False" in hud
     assert "run_coding_loop" in main
+
+
+def test_reflect_requires_review_ok():
+    fail_review = ReviewResult(ok=False, summary="needs tests", findings=["add a test"])
+    ok_check = CheckResult(ok=True, output="pass")
+    assert reflect(check=ok_check, review=fail_review, attempt=1, max_retries=2) == "retry"
+    assert (
+        reflect(check=ok_check, review=fail_review, attempt=2, max_retries=2)
+        == STATUS_RETRY_EXHAUSTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_review_reject_retries_coder_skips_executor():
+    reset_for_tests()
+    calls = {"coder": 0, "exec": 0, "review": 0}
+
+    async def coder(prompt, **_kwargs):
+        calls["coder"] += 1
+        if calls["coder"] > 1:
+            assert "Previous check failure" in prompt
+            assert "needs tests" in prompt
+        return "patched helper"
+
+    async def executor(_argvs, _cwd):
+        calls["exec"] += 1
+        return CheckResult(ok=True, output="pass")
+
+    async def reviewer(_cwd):
+        calls["review"] += 1
+        if calls["review"] == 1:
+            return ReviewResult(
+                ok=False,
+                summary="needs tests",
+                findings=["add a unit test"],
+                verdict="NEEDS_CHANGES",
+            )
+        return ReviewResult(ok=True, summary="ok")
+
+    result = await run_coding_loop(
+        "fix core/foo.py",
+        max_retries=3,
+        inspect=lambda _c: None,
+        coder=coder,
+        executor=executor,
+        reviewer=reviewer,
+        planner=infer_plan,
+    )
+    assert result.status == STATUS_SUCCESS
+    assert calls["coder"] == 2
+    assert calls["review"] == 2
+    assert calls["exec"] == 1
+
+
+@pytest.mark.asyncio
+async def test_simple_task_skips_discover_tools(monkeypatch):
+    reset_for_tests()
+    seen: list[str] = []
+
+    class FakeKernel:
+        def cancelled(self):
+            return False
+
+        async def run_tool(self, name, _args, **_kwargs):
+            seen.append(name)
+            return None
+
+    monkeypatch.setattr("core.execution_kernel.get_kernel", lambda: FakeKernel())
+
+    result = await run_coding_loop(
+        "fix typo in core/foo.py",
+        coder=lambda prompt, **_k: "edited",
+        executor=lambda _a, _c: CheckResult(ok=True, output="ok"),
+        reviewer=lambda _c: ReviewResult(ok=True, summary="ok"),
+        planner=infer_plan,
+    )
+    assert result.status == STATUS_SUCCESS
+    assert "discover_tools" not in seen
+    assert "git_status" in seen

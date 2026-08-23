@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any
 
 _MAX_DEFAULT = 80_000
+_PARSER_MISSING = (
+    "{name} is not available in this Immortility process. "
+    "Document parsers ship with Immortility — do not install packages. "
+    "If a file was attached in chat, answer from the extracted text."
+)
 _SUPPORTED = {".pdf", ".doc", ".docx", ".pptx", ".xlsx", ".csv", ".txt", ".md"}
 SUPPORTED_EXTENSIONS = _SUPPORTED
 _OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
@@ -37,7 +42,7 @@ def _extract_pdf(path: Path, max_chars: int) -> dict[str, Any]:
     try:
         import fitz  # PyMuPDF
     except ImportError:
-        return _fail("PARSER_UNAVAILABLE", "PyMuPDF is not installed. pip install pymupdf")
+        return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="PyMuPDF"))
     try:
         doc = fitz.open(path)
     except Exception as exc:
@@ -74,7 +79,7 @@ def _extract_docx(path: Path, max_chars: int) -> dict[str, Any]:
     try:
         from docx import Document
     except ImportError:
-        return _fail("PARSER_UNAVAILABLE", "python-docx is not installed. pip install python-docx")
+        return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="python-docx"))
     doc = Document(str(path))
     paragraphs = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
     tables = []
@@ -97,7 +102,7 @@ def _extract_pptx(path: Path, max_chars: int) -> dict[str, Any]:
     try:
         from pptx import Presentation
     except ImportError:
-        return _fail("PARSER_UNAVAILABLE", "python-pptx is not installed. pip install python-pptx")
+        return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="python-pptx"))
     pres = Presentation(str(path))
     slides = []
     chunks: list[str] = []
@@ -124,7 +129,7 @@ def _extract_xlsx(path: Path, max_chars: int) -> dict[str, Any]:
     try:
         from openpyxl import load_workbook
     except ImportError:
-        return _fail("PARSER_UNAVAILABLE", "openpyxl is not installed. pip install openpyxl")
+        return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="openpyxl"))
     wb = load_workbook(str(path), read_only=True, data_only=True)
     try:
         sheets = []

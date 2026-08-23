@@ -197,6 +197,19 @@ def test_command_invalid_cwd():
     assert result["error_code"] == "INVALID_CWD"
 
 
+def test_refuses_bundled_parser_pip():
+    result = CommandTool.run_command("pip install python-docx")
+    assert result["status"] == "error"
+    assert result["error_code"] == "ALREADY_INSTALLED"
+    assert "do not pip install" in result["message"].lower()
+    argv = CommandTool.run_argv(
+        [sys.executable, "-m", "pip", "install", "pymupdf"],
+        timeout=5.0,
+    )
+    assert argv["status"] == "error"
+    assert argv["error_code"] == "ALREADY_INSTALLED"
+
+
 def test_run_command_still_requires_confirmation():
     assert needs_confirmation("run_command", {"cmd": "echo hi"})
     assert needs_confirmation("run_command", {"cmd": "git reset --hard HEAD"})

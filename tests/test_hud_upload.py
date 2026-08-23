@@ -46,6 +46,8 @@ def test_save_and_parse_csv(tmp_path, monkeypatch):
     ctx = compose_attachment_context([rec["id"]])
     assert "notes.csv" in ctx
     assert "1,2" in ctx or "a,b" in ctx
+    assert "[IMMORTILITY_ATTACHED_DOCS]" in ctx
+    assert "Do NOT pip install" in ctx
 
 
 def test_save_and_parse_rejects_image():
@@ -131,6 +133,39 @@ def test_multipart_binary_pdf_roundtrip():
     assert files[0][1] == payload
 
 
+def test_multipart_filename_star():
+    boundary = "----Star"
+    body = (
+        b"--" + boundary.encode() + b"\r\n"
+        b"Content-Disposition: form-data; name=\"files\"; "
+        b"filename*=UTF-8''UML%20Class%20Diagram.pdf\r\n"
+        b"Content-Type: application/pdf\r\n\r\n"
+        b"%PDF-1.4 test\r\n"
+        b"--" + boundary.encode() + b"--\r\n"
+    )
+    files = parse_multipart_files(f"multipart/form-data; boundary={boundary}", body)
+    assert files[0][0] == "UML Class Diagram.pdf"
+    assert files[0][1].startswith(b"%PDF")
+
+
+def test_save_and_parse_keeps_unreadable_pdf(tmp_path, monkeypatch):
+    reset_upload_cache()
+    monkeypatch.setattr("tools.hud_upload.uploads_dir", lambda: tmp_path)
+    rec = save_and_parse("scan.pdf", b"this is not a pdf")
+    assert rec["status"] == "success"
+    assert rec["id"]
+    ctx = compose_attachment_context([rec["id"]])
+    assert "scan.pdf" in ctx
+
+
+def test_attach_from_disk_rejects_outside_home(tmp_path):
+    from tools.hud_upload import attach_from_disk
+
+    rec = attach_from_disk(str(tmp_path / "secret.pdf"))
+    assert rec["status"] == "error"
+    assert rec["error_code"] == "NOT_ALLOWED"
+
+
 def test_compose_clips_total(monkeypatch, tmp_path):
     reset_upload_cache()
     monkeypatch.setattr("tools.hud_upload.uploads_dir", lambda: tmp_path)
@@ -149,8 +184,16 @@ def test_compose_clips_total(monkeypatch, tmp_path):
 def test_hud_html_has_attach_control():
     html = Path("frontend/immortility_hud.html").read_text(encoding="utf-8")
     assert 'id="attachBtn"' in html
+    assert 'id="filePick"' in html
     assert "/hud/upload" in html
     assert "attachments" in html
-    assert "showOpenFilePicker" in html
     assert ".doc" in html
     assert "dataTransfer" in html
+    assert "task-rail" in html
+    assert "boot-title" in html
+    assert "An AI that doesn't just answer" in html
+    assert "hud-foot" in html
+    assert "renderRichText" in html
+    assert 'id="fileDrawer"' not in html
+    assert 'id="attachChips"' in html
+    assert "filePick.click()" in html

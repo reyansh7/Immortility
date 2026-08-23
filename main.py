@@ -456,6 +456,8 @@ async def handle_pending_coding_plan(user_input: str) -> bool:
 
     if result.success:
         console.print(f"[bold green]{result.message}[/bold green]")
+    elif getattr(result, "used_coding_loop", False):
+        console.print(f"[red]{result.message}[/red]")
     else:
         console.print(f"[red]{result.message}[/red]")
         console.print("[yellow]Falling back to coding loop (Action Engine coder)…[/yellow]")
@@ -529,6 +531,8 @@ async def _run_coding_workflow(
 
     if result.success:
         console.print(f"[bold green]{result.message}[/bold green]")
+    elif getattr(result, "used_coding_loop", False):
+        console.print(f"[red]{result.message}[/red]")
     else:
         console.print(f"[red]{result.message}[/red]")
         console.print("[yellow]Falling back to coding loop (Action Engine coder)…[/yellow]")

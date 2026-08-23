@@ -186,15 +186,15 @@ What is worth porting natively, and where it would live:
 
 | ECC concept | Immortility equivalent | Phase |
 | --- | --- | --- |
-| Skills as the primary workflow surface, loaded on demand | `skills/` + `SkillRegistry`/`SkillMatcher`, injected into the Action Engine prompt only when matched | 3 |
-| Agents as scoped workers | thin role configs over the existing loop (planner / coder / reviewer / debugger), not new frameworks | 3-4 |
-| Plan to implement to review to verify | extend the existing verification gate with a **fresh-context reviewer** call | 4 |
-| Fresh-context review | second `chat()` call with a clean message list, never the authoring context | 4 |
-| Build-fix loop | generalise `editing/self_debug.py` + `editing/error_classifier.py` with a configurable retry cap | 4 |
+| Skills as the primary workflow surface, loaded on demand | `skills/registry.py` + `prompts/rules/*.md`, injected into planner/coder notes when matched | **3 (shipped)** |
+| Agents as scoped workers | thin role labels on `run_coding_loop` (planner / coder / reviewer / debugger / executor / reflector), not new frameworks | **3 (shipped)** |
+| Plan to implement to review to verify | LLM planner + heuristic fallback, then coder, fresh-context review, allowlisted checks | **3 (shipped)** |
+| Fresh-context review | `core/coding_reviewer.py` — new message list, never the coder conversation | **3 (shipped)** |
+| Build-fix loop | bounded retries in `run_coding_loop` (`IMMORTILITY_MAX_RETRIES`) | **3 (shipped)** |
 | Instincts / continuous learning | already partly present as `memory/outcome_memory.py` and `memory/experience_memory.py`; keep learned items as inspectable data with approve/edit/delete, never auto-promoted to system policy | 6 |
 | Context budgeting | `knowledge/smart_context_builder.py` gains explicit token budgets and pruning | 6 |
-| Rules (durable standards) | `prompts/rules/*.md`, selectively loaded by language/project | 3 |
-| Hooks (deterministic event handlers) | promote `core/event_bus.py` to a lifecycle hook bus (`before_tool`, `after_file_write`, ...) running outside the LLM context | 3 |
+| Rules (durable standards) | `prompts/rules/*.md`, loaded by skill match | **3 (shipped)** |
+| Hooks (deterministic event handlers) | `core/hooks.py` lifecycle on the coding loop, observed via EventBus + harness traces | **3 (shipped)** |
 | AgentShield | `security/` scanners for prompts, config, secrets, MCP, permissions | 8 |
 
 Explicit decision: **ECC is not vendored into this tree.** No `.claude/` directory, no
@@ -235,7 +235,7 @@ immortility1/
 
 See [IMMORTALITY_VISION.md](IMMORTALITY_VISION.md) and [IMMORTALITY_PHASES.md](IMMORTALITY_PHASES.md) for the frozen architecture and honest phase status.
 
-Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are also shipped. Phase 3 slice 3.0 (coding loop) is started. ECC skills/hooks and later phases remain roadmap.
+Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are also shipped. Phase 3 is **complete**. ECC was inspiration only (not vendored). Phase 4 was **not** started.
 
 | Phase | Deliverable | State |
 | --- | --- | --- |
@@ -245,8 +245,8 @@ Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are als
 | K | Execution kernel, FAST/AGENT/BACKGROUND, streaming, warm/cold | shipped |
 | 2A | Capability card/report, permissions, search states | shipped |
 | 2B | Git / documents / Docker inspect / configured DBs / command hardening | shipped |
-| 3 | Autonomous coding loop over existing kernels | started — slice 3.0 (`core/coding_engine.py`). Not complete: no fresh-context reviewer, no ECC skills/hooks |
-| 4 | Fresh-context review + ECC skills / rules / hooks | roadmap |
+| 3 | Autonomous coding loop over existing kernels | **complete** — `core/coding_engine.py` plus skills/hooks/planner/fresh reviewer/PROJECT adapter. ECC was inspiration only (not vendored). Phase 4 was **not** started. |
+| 4 | Multimodal VL/OCR/video | **not started** — ECC/fresh-review items originally listed here shipped in Phase 3 |
 | 5 | Multimodal VL/OCR/video | roadmap |
 | 6 | Memory/RAG budgets; BGE-M3 only with full reindex | roadmap |
 | 7 | Full eval harness + novel-task generalization | roadmap |

@@ -362,7 +362,16 @@ def _try_open_project_folder(message: str) -> str | None:
             return None
 
 
+def has_attached_docs(message: str) -> bool:
+    """True when HUD already injected extracted attachment text this turn."""
+    from tools.hud_upload import ATTACHED_DOC_MARKER
+
+    return ATTACHED_DOC_MARKER in (message or "")
+
+
 def _wants_action(message: str) -> bool:
+    if has_attached_docs(message) and not _wants_edits(message):
+        return False
     low = message.lower().strip()
     if low in _CHAT_ONLY:
         return False
@@ -751,6 +760,7 @@ def handle_hud_request(
     use_action = (
         not advisory
         and strategy == MODE_AGENT
+        and not (has_attached_docs(message) and not _wants_edits(message))
         and (
             _wants_action(message)
             or (browser_reply and not only_open)

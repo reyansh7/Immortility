@@ -12,6 +12,7 @@ import inspect
 import logging
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
@@ -105,6 +106,12 @@ class ReviewResult:
     summary: str = ""
     changed_paths: list[str] = field(default_factory=list)
     patch: str = ""
+    verdict: str = "PASS"
+    findings: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.ok and self.verdict == "PASS":
+            self.verdict = "NEEDS_CHANGES"
 
 
 @dataclass
@@ -115,6 +122,15 @@ class CodingLoopResult:
     attempts: int = 0
     plan: CodingPlan | None = None
     check_output: str = ""
+    changed_paths: list[str] = field(default_factory=list)
+    planner_calls: int = 0
+    coder_calls: int = 0
+    reviewer_calls: int = 0
+    retries: int = 0
+    verified: bool = False
+    latency_ms: int = 0
+    planner_source: str = ""
+    review_verdict: str = ""
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -398,7 +414,41 @@ async def _default_reviewer(cwd: Path) -> ReviewResult:
         f"branch={status.get('branch') if isinstance(status, dict) else '?'} "
         f"changed={len(files)}"
     )
-    return ReviewResult(ok=ok, summary=summary, changed_paths=files, patch=patch[:12000])
+    return ReviewResult(
+        ok=ok,
+        summary=summary,
+        changed_paths=files,
+        patch=patch[:12000],
+        verdict="PASS" if ok else "FAIL",
+        findings=[] if ok else [summary],
+    )
+
+
+_COMPLEX_HINTS = ("multi-file", "feature", "refactor", "architecture")
+
+
+def is_simple_coding_task(request: str, plan: CodingPlan | None = None) -> bool:
+    """True for short, named-file edits that should skip a second inspect/LLM plan."""
+    text = (request or "").lower()
+    if any(k in text for k in _COMPLEX_HINTS):
+        return False
+    if len(request or "") > 220:
+        return False
+    if plan is not None and len(plan.inspect_paths) > 2:
+        return False
+    return True
+
+
+async def _light_inspect(cwd: Path) -> None:
+    from core.execution_kernel import get_kernel
+
+    await get_kernel().run_tool("git_status", {"cwd": str(cwd)}, use_cache=True)
+
+
+def _production_planner(request: str, cwd: Path) -> CodingPlan:
+    from core.coding_planner import plan_coding_task
+
+    return plan_coding_task(request, cwd)
 
 
 def reflect(
@@ -415,7 +465,8 @@ def reflect(
         return STATUS_CANCELLED
     if needs_confirm:
         return STATUS_NEEDS_CONFIRMATION
-    if check.ok:
+    review_ok = True if review is None else review.ok
+    if check.ok and review_ok:
         return STATUS_SUCCESS
     if attempt >= max_retries:
         return STATUS_RETRY_EXHAUSTED
@@ -435,31 +486,104 @@ async def run_coding_loop(
     executor: Callable[..., Awaitable[CheckResult] | CheckResult] | None = None,
     reviewer: Callable[[Path], Awaitable[ReviewResult] | ReviewResult] | None = None,
 ) -> CodingLoopResult:
-    """Planner → inspect → Coder → Executor → Debugger → Reviewer → Reflector."""
+    """Planner → inspect → Coder → Reviewer → Executor → Debugger → Reflector.
+
+    Injected planner/inspect/coder/executor/reviewer still win (tests). Default
+    planner/reviewer are lazy-imported so this module does not import them at
+    load time. Destructive git is never issued here.
+    """
+    from core.hooks import (
+        AFTER_EXECUTE,
+        AFTER_REVIEW,
+        BEFORE_EDIT,
+        BEFORE_EXECUTE,
+        BEFORE_FINALIZE,
+        BEFORE_INSPECT,
+        BEFORE_PLAN,
+        BEFORE_REVIEW,
+        get_hook_runner,
+    )
+
+    started = time.perf_counter()
     begin_turn(mode=MODE_AGENT)
     root = _resolve_cwd(cwd)
     budget = max_retries if max_retries is not None else _retry_budget()
     budget = max(1, int(budget))
+    hooks = get_hook_runner()
 
-    plan_fn = planner or infer_plan
-    plan = plan_fn(request, root)
-    if not isinstance(plan, CodingPlan) or not plan.success_criteria.is_explicit():
+    planner_calls = 0
+    coder_calls = 0
+    reviewer_calls = 0
+    planner_source = "injected" if planner is not None else "plan_coding_task"
+    last_check = CheckResult(ok=False, output="not run")
+    last_review: ReviewResult | None = None
+    last_coder = ""
+    attempts = 0
+    plan: CodingPlan | None = None
+
+    def _finish(
+        status: str,
+        message: str,
+        role: str,
+        *,
+        verified: bool = False,
+    ) -> CodingLoopResult:
         return CodingLoopResult(
-            status=STATUS_BLOCKED,
-            message="Planner did not produce success criteria.",
-            role=ROLE_PLANNER,
+            status=status,
+            message=message,
+            role=role,
+            attempts=attempts,
+            plan=plan,
+            check_output=last_check.output,
+            changed_paths=list(last_review.changed_paths) if last_review else [],
+            planner_calls=planner_calls,
+            coder_calls=coder_calls,
+            reviewer_calls=reviewer_calls,
+            retries=max(0, attempts - 1) if attempts else 0,
+            verified=verified,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            planner_source=planner_source,
+            review_verdict=last_review.verdict if last_review else "",
+        )
+
+    if _kernel_cancelled():
+        return _finish(STATUS_CANCELLED, "Cancelled before plan.", ROLE_PLANNER)
+
+    pre_plan = hooks.run(BEFORE_PLAN, {"request": request, "cwd": str(root)})
+    if pre_plan.cancelled or _kernel_cancelled():
+        return _finish(STATUS_CANCELLED, "Cancelled before plan.", ROLE_PLANNER)
+
+    plan_fn = planner if planner is not None else _production_planner
+    plan = plan_fn(request, root)
+    planner_calls = 1
+    if pre_plan.extra_context:
+        plan.success_criteria.notes = (
+            f"{plan.success_criteria.notes}\n{pre_plan.extra_context}".strip()[:4000]
+        )
+    if not isinstance(plan, CodingPlan) or not plan.success_criteria.is_explicit():
+        return _finish(
+            STATUS_BLOCKED,
+            "Planner did not produce success criteria.",
+            ROLE_PLANNER,
         )
     _trace(ROLE_PLANNER, detail=plan.goal[:200])
 
     if _kernel_cancelled():
-        return CodingLoopResult(
-            status=STATUS_CANCELLED,
-            message="Cancelled before inspect.",
-            role=ROLE_PLANNER,
-            plan=plan,
-        )
+        return _finish(STATUS_CANCELLED, "Cancelled before inspect.", ROLE_PLANNER)
 
-    inspect_fn = inspect if inspect is not None else _default_inspect
+    simple = is_simple_coding_task(request, plan)
+    pre_inspect = hooks.run(
+        BEFORE_INSPECT,
+        {"request": request, "simple": simple, "cwd": str(root)},
+    )
+    if pre_inspect.cancelled or _kernel_cancelled():
+        return _finish(STATUS_CANCELLED, "Cancelled before inspect.", ROLE_PLANNER)
+    if inspect is not None:
+        inspect_fn = inspect
+    elif pre_inspect.skip:
+        inspect_fn = _light_inspect
+    else:
+        inspect_fn = _default_inspect
     try:
         await _maybe_await(inspect_fn(root))
     except Exception as exc:
@@ -467,25 +591,17 @@ async def run_coding_loop(
     _trace(ROLE_PLANNER, detail="inspect")
 
     debug_notes = ""
-    last_check = CheckResult(ok=False, output="not run")
-    last_review: ReviewResult | None = None
-    last_coder = ""
-    attempts = 0
+    coder_fn = coder if coder is not None else _default_coder
+    executor_fn = executor if executor is not None else _default_executor
 
     for attempt in range(1, budget + 1):
         attempts = attempt
         if _kernel_cancelled():
-            return CodingLoopResult(
-                status=STATUS_CANCELLED,
-                message="Cancelled.",
-                role=ROLE_CODER,
-                attempts=attempts,
-                plan=plan,
-            )
+            return _finish(STATUS_CANCELLED, "Cancelled.", ROLE_CODER)
 
+        hooks.run(BEFORE_EDIT, {"cwd": str(root), "attempt": attempt})
         role = ROLE_DEBUGGER if debug_notes else ROLE_CODER
         prompt = _coder_prompt(plan, debug_notes)
-        coder_fn = coder if coder is not None else _default_coder
         last_coder = str(
             await _maybe_await(
                 coder_fn(
@@ -495,25 +611,83 @@ async def run_coding_loop(
                 )
             )
         )
+        coder_calls += 1
         _trace(role, detail=f"attempt {attempt}", retries=attempt - 1)
 
         if _pending_confirmation():
             _trace(ROLE_REFLECTOR, detail=STATUS_NEEDS_CONFIRMATION)
-            return CodingLoopResult(
-                status=STATUS_NEEDS_CONFIRMATION,
-                message=last_coder,
-                role=ROLE_CODER,
-                attempts=attempts,
-                plan=plan,
+            return _finish(STATUS_NEEDS_CONFIRMATION, last_coder, ROLE_CODER)
+
+        if _kernel_cancelled():
+            return _finish(STATUS_CANCELLED, "Cancelled.", ROLE_CODER)
+
+        async def _fresh_reviewer(review_cwd: Path) -> ReviewResult:
+            from core.coding_reviewer import review_coding_result
+
+            check_for_review = last_check if last_check.output != "not run" else None
+            return review_coding_result(
+                review_cwd,
+                plan,
+                check_for_review,
+                use_llm=not simple,
             )
 
-        reviewer_fn = reviewer if reviewer is not None else _default_reviewer
+        hooks.run(
+            BEFORE_REVIEW,
+            {
+                "goal": plan.goal,
+                "cwd": str(root),
+                "changed_paths": list(last_review.changed_paths) if last_review else [],
+            },
+        )
+        reviewer_fn = reviewer if reviewer is not None else _fresh_reviewer
         last_review = await _maybe_await(reviewer_fn(root))
+        reviewer_calls += 1
+        hooks.run(
+            AFTER_REVIEW,
+            {
+                "ok": last_review.ok,
+                "findings": list(last_review.findings),
+            },
+        )
         _trace(ROLE_REVIEWER, detail=last_review.summary)
 
+        if not last_review.ok:
+            findings = "\n".join(last_review.findings)
+            last_check = CheckResult(
+                ok=False,
+                output=(
+                    f"{last_review.summary}\n{findings}".strip()
+                    if (last_review.summary or findings)
+                    else "review rejected"
+                ),
+            )
+            decision = reflect(
+                check=last_check,
+                review=last_review,
+                attempt=attempt,
+                max_retries=budget,
+                cancelled=_kernel_cancelled(),
+                needs_confirm=_pending_confirmation(),
+            )
+            _trace(ROLE_REFLECTOR, detail=decision, retries=attempt - 1)
+            if decision == STATUS_CANCELLED:
+                return _finish(STATUS_CANCELLED, "Cancelled during review.", ROLE_REFLECTOR)
+            if decision != "retry":
+                break
+            debug_notes = last_check.output or "review rejected"
+            _trace(ROLE_DEBUGGER, detail=debug_notes[:200], retries=attempt)
+            continue
+
         argvs = build_check_argvs(plan, root, last_review.changed_paths)
-        executor_fn = executor if executor is not None else _default_executor
+        pre_exec = hooks.run(
+            BEFORE_EXECUTE,
+            {"argv": argvs[0] if argvs else [], "cwd": str(root)},
+        )
+        if pre_exec.cancelled or _kernel_cancelled():
+            return _finish(STATUS_CANCELLED, "Cancelled before checks.", ROLE_EXECUTOR)
         last_check = await _maybe_await(executor_fn(argvs, root))
+        hooks.run(AFTER_EXECUTE, {"ok": last_check.ok})
         _trace(
             ROLE_EXECUTOR,
             detail=" ".join(last_check.argv)[:200],
@@ -531,26 +705,19 @@ async def run_coding_loop(
         _trace(ROLE_REFLECTOR, detail=decision, retries=attempt - 1)
 
         if decision == STATUS_SUCCESS:
+            hooks.run(
+                BEFORE_FINALIZE,
+                {
+                    "check_ok": last_check.ok,
+                    "review_ok": last_review.ok if last_review else True,
+                },
+            )
             summary = last_coder.strip() or "Coding loop finished."
             extra = last_review.summary if last_review else ""
             msg = summary if not extra else f"{summary}\n\nReview: {extra}"
-            return CodingLoopResult(
-                status=STATUS_SUCCESS,
-                message=msg,
-                role=ROLE_REFLECTOR,
-                attempts=attempts,
-                plan=plan,
-                check_output=last_check.output,
-            )
+            return _finish(STATUS_SUCCESS, msg, ROLE_REFLECTOR, verified=True)
         if decision == STATUS_CANCELLED:
-            return CodingLoopResult(
-                status=STATUS_CANCELLED,
-                message="Cancelled during checks.",
-                role=ROLE_REFLECTOR,
-                attempts=attempts,
-                plan=plan,
-                check_output=last_check.output,
-            )
+            return _finish(STATUS_CANCELLED, "Cancelled during checks.", ROLE_REFLECTOR)
         if decision != "retry":
             break
         debug_notes = last_check.output or "checks failed"
@@ -560,14 +727,7 @@ async def run_coding_loop(
         f"Coding loop stopped after {attempts} attempt(s). "
         f"Checks still failing.\n{last_check.output[-2000:]}"
     )
-    return CodingLoopResult(
-        status=STATUS_RETRY_EXHAUSTED,
-        message=fail_msg,
-        role=ROLE_REFLECTOR,
-        attempts=attempts,
-        plan=plan,
-        check_output=last_check.output,
-    )
+    return _finish(STATUS_RETRY_EXHAUSTED, fail_msg, ROLE_REFLECTOR)
 
 
 def wants_coding_loop(message: str, *, require_edits: bool = False) -> bool:

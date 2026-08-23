@@ -11,6 +11,7 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from core.repo_paths import get_repo_root
 from tools.document_tool import SUPPORTED_EXTENSIONS, extract_document, extracted_text
@@ -18,6 +19,9 @@ from tools.document_tool import SUPPORTED_EXTENSIONS, extract_document, extracte
 # Windows "20.0 MB" is often a hair over 20 MiB, and multipart adds headers.
 # 25 MiB/file keeps a real 20 MB PDF inside the cap. Text sent to the model
 # is still clipped (PER_FILE_CHARS) so 8 GB VRAM / 8192 ctx stays safe.
+# Injected into the model prompt so routing can skip Action Engine re-extract.
+ATTACHED_DOC_MARKER = "[IMMORTILITY_ATTACHED_DOCS]"
+
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_FILES = 4
 MAX_REQUEST_BYTES = 48 * 1024 * 1024
@@ -45,6 +49,30 @@ def safe_filename(name: str) -> str:
     return base[:120]
 
 
+def _multipart_filename(headers: str) -> str:
+    starred = re.search(r"filename\*=(?:UTF-8''|utf-8'')?([^;\r\n]+)", headers, re.I)
+    if starred:
+        return unquote(starred.group(1).strip().strip('"'))
+    quoted = re.search(r'filename="([^"]*)"', headers, re.I)
+    if quoted:
+        return unquote(quoted.group(1).strip())
+    plain = re.search(r"filename=([^;\r\n]+)", headers, re.I)
+    if plain:
+        return unquote(plain.group(1).strip().strip('"'))
+    return ""
+
+
+def _guess_upload_name(payload: bytes) -> str:
+    head = payload.lstrip()[:8]
+    if head.startswith(b"%PDF"):
+        return "upload.pdf"
+    if head.startswith(b"PK"):
+        return "upload.docx"
+    if head[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return "upload.doc"
+    return ""
+
+
 def parse_multipart_files(content_type: str, body: bytes) -> list[tuple[str, bytes]]:
     """Parse browser FormData file parts. Binary-safe (email.parser corrupts PDFs)."""
     match = re.search(r"boundary=([^;]+)", content_type or "", re.I)
@@ -54,7 +82,7 @@ def parse_multipart_files(content_type: str, body: bytes) -> list[tuple[str, byt
     sep = b"--" + boundary
     files: list[tuple[str, bytes]] = []
     for raw in body.split(sep):
-        if not raw or raw.startswith(b"--"):
+        if not raw or raw in {b"--", b"--\r\n", b"--\n"} or raw.startswith(b"--"):
             continue
         if raw.startswith(b"\r\n"):
             raw = raw[2:]
@@ -73,18 +101,111 @@ def parse_multipart_files(content_type: str, body: bytes) -> list[tuple[str, byt
             payload = payload[:-2]
         elif payload.endswith(b"\n"):
             payload = payload[:-1]
-        found = re.search(r"filename\*=(?:UTF-8'')?([^;\r\n]+)", headers, re.I)
-        if found:
-            filename = found.group(1).strip().strip('"')
-        else:
-            found = re.search(r'filename="([^"]*)"', headers, re.I)
-            if not found:
-                found = re.search(r"filename=([^;\r\n]+)", headers, re.I)
-            if not found:
-                continue
-            filename = found.group(1).strip().strip('"')
+        filename = _multipart_filename(headers) or _guess_upload_name(payload)
+        if not filename or not payload:
+            continue
         files.append((filename, payload))
     return files
+
+
+def browse_places() -> list[tuple[str, Path]]:
+    """Desktop/Documents/Downloads, including OneDrive copies on this laptop."""
+    home = Path.home()
+    seen: set[Path] = set()
+    places: list[tuple[str, Path]] = []
+    for label, path in (
+        ("Desktop", home / "OneDrive" / "Desktop"),
+        ("Desktop", home / "Desktop"),
+        ("Documents", home / "OneDrive" / "Documents"),
+        ("Documents", home / "Documents"),
+        ("Downloads", home / "Downloads"),
+        ("Downloads", home / "OneDrive" / "Downloads"),
+    ):
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if not resolved.is_dir() or resolved in seen:
+            continue
+        seen.add(resolved)
+        places.append((label, resolved))
+    return places
+
+
+def list_attachable_files(place: str = "") -> list[dict[str, Any]]:
+    """Vertical file list for the HUD picker. Non-recursive, documents only."""
+    wanted = (place or "Desktop").strip().lower()
+    rows: list[dict[str, Any]] = []
+    for label, root in browse_places():
+        if wanted and label.lower() != wanted:
+            continue
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for item in entries:
+            if not item.is_file():
+                continue
+            suffix = item.suffix.lower()
+            if suffix not in SUPPORTED_EXTENSIONS:
+                continue
+            try:
+                size = int(item.stat().st_size)
+            except OSError:
+                continue
+            rows.append(
+                {
+                    "name": item.name,
+                    "path": str(item),
+                    "place": label,
+                    "size": size,
+                    "suffix": suffix,
+                }
+            )
+    rows.sort(key=lambda r: r["name"].lower())
+    return rows[:200]
+
+
+def attach_from_disk(path: str) -> dict[str, Any]:
+    """Attach a file already on disk (no multipart). Path must be under browse_places()."""
+    if not path or not str(path).strip():
+        return {
+            "status": "error",
+            "error_code": "INVALID_ARGS",
+            "message": "No file path.",
+        }
+    target = Path(path).expanduser()
+    try:
+        resolved = target.resolve()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error_code": "NOT_FOUND",
+            "message": f"Cannot open that file ({exc}).",
+        }
+    allowed = False
+    for _label, root in browse_places():
+        try:
+            resolved.relative_to(root.resolve())
+            allowed = True
+            break
+        except ValueError:
+            continue
+    if not allowed or not resolved.is_file():
+        return {
+            "status": "error",
+            "error_code": "NOT_ALLOWED",
+            "message": "Pick a file from Desktop, Documents, or Downloads.",
+        }
+    try:
+        data = resolved.read_bytes()
+    except OSError as exc:
+        return {
+            "status": "error",
+            "error_code": "NOT_FOUND",
+            "message": f"Could not read {resolved.name}: {exc}",
+        }
+    return save_and_parse(resolved.name, data)
 
 
 def save_and_parse(filename: str, data: bytes) -> dict[str, Any]:
@@ -135,25 +256,18 @@ def save_and_parse(filename: str, data: bytes) -> dict[str, Any]:
     try:
         parsed = extract_document(str(dest), max_chars=PER_FILE_CHARS)
     except Exception as exc:
-        return {
+        parsed = {
             "status": "error",
             "error_code": "PARSE_FAILED",
             "message": f"Could not parse {name}: {exc}",
-            "name": name,
         }
-    if parsed.get("status") != "success":
-        return {
-            "status": "error",
-            "error_code": parsed.get("error_code") or "PARSE_FAILED",
-            "message": parsed.get("message") or f"Failed to parse {name}",
-            "name": name,
-        }
-    text = extracted_text(parsed)[:PER_FILE_CHARS]
-    if not text.strip():
-        text = (
-            f"[No extractable text in {name}. "
-            "It may be scanned, image-only, or encrypted.]"
+    extracted = extracted_text(parsed)[:PER_FILE_CHARS] if parsed.get("status") == "success" else ""
+    if not extracted.strip():
+        extracted = (
+            parsed.get("message")
+            or f"[Attached {name}. No extractable text — it may be scanned, image-only, or encrypted.]"
         )
+    text = extracted[:PER_FILE_CHARS]
     record = {
         "id": upload_id,
         "name": name,
@@ -200,8 +314,10 @@ def compose_attachment_context(ids: list[str]) -> str:
     if not chunks:
         return ""
     return (
-        "The user attached file(s). Answer from this extracted text. "
-        "Do not invent pages that are not present.\n\n"
+        f"{ATTACHED_DOC_MARKER}\n"
+        "The user attached file(s). The document text is already extracted below. "
+        "Do NOT pip install, do NOT call extract_document, do NOT run_command for parsers. "
+        "Answer from this text only. Do not invent pages that are not present.\n\n"
         + "\n\n----\n\n".join(chunks)
     )
 

@@ -199,6 +199,20 @@ class _HudHandler(BaseHTTPRequestHandler):
             self._json(200, {"events": _tail_events(limit)})
             return
 
+        if path == "/hud/browse":
+            if not _check_token(self):
+                self._json(401, {"error": "unauthorized"})
+                return
+            from urllib.parse import parse_qs
+
+            from tools.hud_upload import browse_places, list_attachable_files
+
+            qs = parse_qs(urlparse(self.path).query)
+            place = str((qs.get("place") or ["Desktop"])[0] or "Desktop")
+            places = [label for label, _root in browse_places()]
+            self._json(200, {"ok": True, "place": place, "places": places, "files": list_attachable_files(place)})
+            return
+
         self.send_error(404)
 
     def _read_json_body(self) -> dict[str, Any] | None:
@@ -221,6 +235,7 @@ class _HudHandler(BaseHTTPRequestHandler):
             "/hud/face",
             "/hud/confirm",
             "/hud/upload",
+            "/hud/attach-path",
             "/api/todos",
         }:
             self.send_error(404)
@@ -231,6 +246,26 @@ class _HudHandler(BaseHTTPRequestHandler):
 
         if path == "/hud/upload":
             self._handle_upload()
+            return
+        if path == "/hud/attach-path":
+            data = self._read_json_body()
+            if data is None:
+                return
+            from tools.hud_upload import attach_from_disk
+
+            rec = attach_from_disk(str(data.get("path") or ""))
+            if rec.get("status") == "success":
+                self._json(200, {"ok": True, "files": [rec], "errors": []})
+            else:
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "files": [],
+                        "errors": [rec.get("message") or "Attach failed."],
+                        "error": rec.get("message") or "Attach failed.",
+                    },
+                )
             return
 
         data = self._read_json_body()
@@ -363,6 +398,7 @@ class _HudHandler(BaseHTTPRequestHandler):
             logger.warning("multipart parse failed: %s", exc)
             self._json(400, {"error": "Could not read the upload. Try one file at a time."})
             return
+        logger.info("HUD upload bytes=%s parts=%s", length, len(files))
         if not files:
             self._json(400, {"error": "No files in upload."})
             return
@@ -388,6 +424,7 @@ class _HudHandler(BaseHTTPRequestHandler):
                 "ok": bool(results),
                 "files": results,
                 "errors": errors,
+                "error": errors[0] if errors and not results else None,
             },
         )
 
@@ -412,7 +449,7 @@ class _HudHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 logger.debug("attachment context: %s", exc)
         if not message and attach_ctx:
-            message = "Read the attached file(s) and answer based on their contents."
+            message = "I attached a document. Use the extracted text already provided."
         if not message:
             self._json(400, {"error": "empty message"})
             return

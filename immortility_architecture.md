@@ -103,16 +103,19 @@ Repo boundary: cwd must be inside the Immortility repo, the active project, or `
 
 Limitations: no MySQL/Redis tools; Docker write ops besides confirmed `stop`/`rm` are not registered; Postgres/Mongo need drivers + a configured URL; parsers must be installed (`pymupdf`, `python-docx`, `python-pptx`, `openpyxl`).
 
-## Phase 3 slice 3.0 — coding loop (started, not complete)
+## Phase 3 — coding loop (complete)
 
-Thin roles over the existing kernels. Not a new agent framework and not a second shell.
+Thin roles over the existing kernels. Not a new agent framework and not a second shell. ECC ([affaan-m/ECC](https://github.com/affaan-m/ECC)) inspired on-demand skills, durable rules, deterministic hooks, plan-before-build, inspect-first, and fresh-context review. Those ideas are reimplemented here; `.claude/`, ECC skill markdown, and `hooks.json` are **not** vendored.
 
 ```
-Planner (success criteria) → inspect (discover_tools + git_status)
+Planner (heuristic, LLM only when underspecified)
+        → inspect (git_status; discover_tools skipped on simple tasks)
         → Coder (execute_action / Tool Kernel, confirmations intact)
-        → Reviewer (git_status / git_diff only)
-        → Executor (CommandTool pytest / py_compile allowlist)
-        → Reflector (finish / retry debug / stop)
+        → Reviewer (fresh message list; git_status / git_diff; PASS/FAIL/NEEDS_CHANGES)
+        → Executor (CommandTool pytest / py_compile allowlist) [skipped if review fails]
+        → Reflector (finish only if checks **and** review pass; else bounded debug retry)
 ```
 
-Retry budget is `IMMORTILITY_MAX_RETRIES` (same as the decision engine). Destructive git is never issued by this loop. ECC skills, hooks, and fresh-context review are **not** in this slice.
+Skills live in `skills/registry.py` + `prompts/rules/*.md`. Hooks live in `core/hooks.py` and cannot bypass cancel. PROJECT `CodingWorkflow` JWT/rename/logging paths stay deterministic; general coding uses this loop. Retry budget is `IMMORTILITY_MAX_RETRIES`. Destructive git is never issued by this loop.
+
+Phase 4 (multimodal VL/OCR/audio/video) is **not** started.

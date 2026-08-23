@@ -53,3 +53,20 @@ def test_polish_strips_headings_and_links():
     assert "###" not in out
     assert "Title - Medium" in out
     assert "medium.com" in out
+
+
+def test_attached_docs_skip_action_engine():
+    from tools.hud_upload import ATTACHED_DOC_MARKER
+
+    assert not _wants_action(
+        "I attached a document. Use the extracted text already provided."
+    )
+    attached = (
+        "I attached a document. Use the extracted text already provided.\n\n"
+        f"{ATTACHED_DOC_MARKER}\n"
+        "The user attached file(s). The document text is already extracted below."
+    )
+    assert not _wants_action(attached)
+    assert not _wants_action("Read the attached file(s).\n\n" + attached)
+    assert _wants_action("create a folder named traffic_detector on Desktop")
+

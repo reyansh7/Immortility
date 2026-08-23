@@ -278,71 +278,48 @@ async def test_8_fastapi_crud_creates_new_files_only(tmp_path):
 
 @pytest.mark.asyncio
 async def test_workflow_fails_when_no_patches(sample_project):
+    from core.coding_engine import ROLE_REFLECTOR, STATUS_RETRY_EXHAUSTED, CodingLoopResult
     from editing.coding_workflow import CodingWorkflow
-    from editing.edit_planner import EditPlan
 
     workflow = CodingWorkflow(project_root=sample_project)
-    empty_plan = EditPlan(
-        goal="quantum flux capacitor",
-        files_to_read=[],
-        files_to_edit=[],
-        dependencies=[],
-        risks=[],
-        verification_strategy="syntax check",
-        symbols_to_modify=[],
-        plan_steps=["No-op"],
-    )
-    with patch.object(
-        workflow.patch_generator, "generate_patches", new_callable=AsyncMock
-    ) as mock_gen, patch.object(
-        workflow.edit_planner, "generate_plan", new_callable=AsyncMock
-    ) as mock_plan:
-        mock_gen.return_value = []
-        mock_plan.return_value = empty_plan
+    with patch(
+        "core.coding_engine.run_coding_loop", new_callable=AsyncMock
+    ) as mock_loop:
+        mock_loop.return_value = CodingLoopResult(
+            status=STATUS_RETRY_EXHAUSTED,
+            message="No patches generated.",
+            role=ROLE_REFLECTOR,
+        )
         result = await workflow.run("Implement quantum flux capacitor module")
         assert not result.success
         assert result.files_modified == []
+        assert result.used_coding_loop is True
+        mock_loop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_llm_patch_generation_creates_file(tmp_path):
-    from editing.patch_generator import PatchOperation
-    from editing.edit_planner import EditPlan
+    from core.coding_engine import ROLE_REFLECTOR, STATUS_SUCCESS, CodingLoopResult
     from editing.coding_workflow import CodingWorkflow
 
     (tmp_path / "main.py").write_text(
         "from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8"
     )
 
-    fake_patches = [
-        PatchOperation(
-            path=str(tmp_path / "auth.py"),
-            operation="create_file",
-            args={"content": "class Auth:\n    pass\n"},
-            reason="Create auth module",
-        ),
-    ]
+    async def fake_loop(request, **kwargs):
+        (tmp_path / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
+        return CodingLoopResult(
+            status=STATUS_SUCCESS,
+            message="created auth.py",
+            role=ROLE_REFLECTOR,
+            changed_paths=["auth.py"],
+        )
 
     workflow = CodingWorkflow(project_root=tmp_path)
-    with patch.object(
-        workflow.patch_generator, "generate_patches", new_callable=AsyncMock
-    ) as mock_gen:
-        mock_gen.return_value = fake_patches
-        with patch.object(
-            workflow.edit_planner, "generate_plan", new_callable=AsyncMock
-        ) as mock_plan:
-            mock_plan.return_value = EditPlan(
-                goal="Add auth",
-                files_to_read=["main.py"],
-                files_to_edit=["auth.py"],
-                dependencies=[],
-                risks=[],
-                verification_strategy="syntax check",
-                symbols_to_modify=[],
-                plan_steps=["Create auth.py"],
-            )
-            result = await workflow.run("Add authentication module")
+    with patch("core.coding_engine.run_coding_loop", new=fake_loop):
+        result = await workflow.run("Add authentication module")
 
     assert result.success
+    assert result.used_coding_loop is True
     assert (tmp_path / "auth.py").exists()
     assert "class Auth" in (tmp_path / "auth.py").read_text(encoding="utf-8")

@@ -52,6 +52,7 @@ class EditResult:
     message: str
     files_modified: list[str] = field(default_factory=list)
     failed_patches: list[str] = field(default_factory=list)
+    used_coding_loop: bool = False
 
 
 class CodingWorkflow:
@@ -115,31 +116,7 @@ class CodingWorkflow:
             )
             patches = quick_patches
         else:
-            edit_plan = await self.edit_planner.generate_plan(
-                user_request,
-                self.rag_context + (f"\n\n{planner_hint}" if planner_hint else ""),
-            )
-            edit_plan = self._merge_planner_hint(edit_plan, planner_hint)
-            console.print(f"[green]Plan:[/green] {edit_plan.goal}")
-            for step in edit_plan.plan_steps:
-                console.print(f"  - {step}")
-
-            self._read_plan_files(edit_plan)
-
-            patches = self._build_patches_from_request(user_request, edit_plan)
-            if not patches and not is_jwt:
-                console.print("[cyan]Generating patches with Qwen (single batch)...[/cyan]")
-                patches = await self.patch_generator.generate_patches(
-                    user_request=user_request,
-                    edit_plan=edit_plan,
-                    project_root=self.project_root,
-                    file_index=self.file_index,
-                    project_structure=self._project_structure(),
-                    rag_context=self.rag_context,
-                    protect_layout=is_jwt or "jwt" in lower_req or "authentication" in lower_req,
-                )
-            elif is_jwt:
-                patches = quick_patches
+            return await self._run_via_coding_loop(user_request, planner_hint)
 
         if not patches:
             if is_jwt and not self._layout_is_corrupted():
@@ -218,6 +195,32 @@ class CodingWorkflow:
         except Exception:
             pass
         return EditResult(success=True, message=summary, files_modified=files_modified)
+
+    async def _run_via_coding_loop(
+        self, user_request: str, planner_hint: str = ""
+    ) -> EditResult:
+        """General coding goes through the canonical loop, not a second LLM patcher."""
+        from core.coding_engine import STATUS_SUCCESS, run_coding_loop
+
+        prompt = user_request
+        if planner_hint:
+            prompt = f"{user_request}\n\nPlan hint:\n{planner_hint[:4000]}"
+        if self.rag_context:
+            prompt = f"{prompt}\n\nProject context:\n{self.rag_context[:3000]}"
+        console.print("[cyan]Using canonical coding loop (Planner → Coder → Reviewer → checks)[/cyan]")
+        loop = await run_coding_loop(
+            prompt,
+            cwd=self.project_root,
+            context_override=self.rag_context,
+            auto_confirm=False,
+        )
+        files = list(getattr(loop, "changed_paths", None) or [])
+        return EditResult(
+            success=loop.status == STATUS_SUCCESS,
+            message=loop.message,
+            files_modified=files,
+            used_coding_loop=True,
+        )
 
     async def _verify_build_with_retry(
         self,

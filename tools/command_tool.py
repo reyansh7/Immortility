@@ -285,6 +285,29 @@ def _popen_kwargs() -> dict[str, Any]:
     return kwargs
 
 
+_BUNDLED_PARSER_PACKAGES = (
+    "python-docx",
+    "pymupdf",
+    "python-pptx",
+    "openpyxl",
+    "lxml",
+)
+
+
+def _is_bundled_parser_install(label: str, popen_args: Any) -> bool:
+    parts = [label or ""]
+    if isinstance(popen_args, (list, tuple)):
+        parts.extend(str(a) for a in popen_args)
+    elif isinstance(popen_args, str):
+        parts.append(popen_args)
+    blob = " ".join(parts).lower()
+    if "install" not in blob:
+        return False
+    if not any(token in blob for token in ("pip", "pip3", "pip.exe")):
+        return False
+    return any(pkg in blob for pkg in _BUNDLED_PARSER_PACKAGES)
+
+
 def execute_command(
     popen_args: Any,
     *,
@@ -314,6 +337,28 @@ def execute_command(
         return cwd_err
 
     label = display or (popen_args if isinstance(popen_args, str) else " ".join(map(str, popen_args)))
+    if _is_bundled_parser_install(str(label), popen_args):
+        refused = {
+            "status": "error",
+            "error_code": "ALREADY_INSTALLED",
+            "message": (
+                "That parser is already bundled with Immortility. "
+                "If the user attached a file, answer from the extracted text. "
+                "Otherwise call extract_document with the file path. Do not pip install."
+            ),
+            "stdout": "",
+            "stderr": "",
+            "returncode": None,
+            "cwd": resolved,
+            "timed_out": False,
+            "cancelled": False,
+        }
+        _record_command_trace(
+            argv_or_cmd=str(label),
+            total_ms=0,
+            error="ALREADY_INSTALLED",
+        )
+        return refused
     classification = classify_command(label)
     logger.info(
         "execute_command shell=%s cwd=%s class=%s :: %s",
