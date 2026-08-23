@@ -403,6 +403,7 @@ def handle_hud_request(
     message: str,
     *,
     history: list[dict[str, str]] | None = None,
+    on_token: Any = None,
 ) -> str:
     """Process a HUD chat/voice message and actually do the work."""
     message = (message or "").strip()
@@ -452,6 +453,14 @@ def handle_hud_request(
                 return "Cancelled."
     except Exception as exc:
         logger.debug("pending check: %s", exc)
+
+    try:
+        from core.capabilities import answer_capability_question, wants_capability_report
+
+        if wants_capability_report(message):
+            return answer_capability_question(message)
+    except Exception as exc:
+        logger.debug("capability report: %s", exc)
 
     # Knowledge: /open indexing + bulk desktop ingest + "read the projects"
     # MUST run before projects-scan / VS Code folder open (those used to steal these).
@@ -577,6 +586,16 @@ def handle_hud_request(
     except Exception:
         pass
 
+    # Working-tree / git changes — before RAG/web. Those paths invent files.
+    try:
+        from tools.git_tool import answer_repo_changes, wants_repo_changes
+
+        if wants_repo_changes(message):
+            return (multi_prefix + answer_repo_changes(message)).strip()
+    except Exception as exc:
+        logger.exception("repo-change inspect failed")
+        return f"I hit an error reading git status/diff: {exc}"
+
     # Shared source router — WEB only when policy says so (with RAG context)
     try:
         from core.source_router import choose_source
@@ -637,7 +656,6 @@ def handle_hud_request(
         return f"Web research failed: {exc}"
 
     # Explicit open / index already handled above; continue ladder
-
 
     # Index Immortility into local TurboVec (store code for RAG)
     low_msg = message.lower().strip()
@@ -700,10 +718,39 @@ def handle_hud_request(
     # Advisory follow-ups ("how do I start the project?") stay in chat with history —
     # never route them to the action engine (which web-searches and dumps Medium links).
     from core.chat_thread import is_advisory_chat
+    from core.execution_mode import MODE_AGENT, MODE_BACKGROUND, MODE_FAST
+    from core.harness import begin_turn
+    from core.router import classify_strategy
 
     advisory = is_advisory_chat(message)
+    strategy = classify_strategy(message)
+    begin_turn(mode=strategy)
+
+    if strategy == MODE_BACKGROUND:
+        from core.execution_kernel import get_kernel
+
+        def _bg(handle) -> None:
+            handle.progress = "running"
+            try:
+                from core.action_engine import execute_action
+
+                handle.result = _run_async(
+                    execute_action(message, require_edits=False, auto_confirm=False)
+                )
+                handle.progress = "done"
+            except Exception as exc:
+                handle.error = str(exc)
+                handle.progress = "error"
+
+        ack, handle = get_kernel().run_task(
+            _bg,
+            ack="Started background task. Immortility stays available for other questions.",
+        )
+        return (multi_prefix + f"{ack}\nProgress: queued (id={handle.task_id})").strip()
+
     use_action = (
         not advisory
+        and strategy == MODE_AGENT
         and (
             _wants_action(message)
             or (browser_reply and not only_open)
@@ -749,12 +796,22 @@ def handle_hud_request(
                 from rich.console import Console
 
                 Console().print(
-                    f"[bold magenta][HUD → Action Engine][/bold magenta] {message[:160]}"
+                    f"[bold magenta][HUD → {'Coding loop' if require_edits else 'Action Engine'}][/bold magenta] "
+                    f"{message[:160]}"
                 )
             except Exception:
                 pass
 
             async def _act() -> str:
+                if require_edits:
+                    from core.coding_engine import run_coding_loop
+
+                    loop = await run_coding_loop(
+                        message,
+                        context_override=context_override,
+                        auto_confirm=False,
+                    )
+                    return loop.message
                 return await execute_action(
                     message,
                     require_edits=require_edits,
@@ -835,14 +892,17 @@ def handle_hud_request(
                 ke.get_routing_context(message, n_results=8) or ""
             ).strip()
         else:
-            # Avoid stuffing unrelated RAG when continuing a new project-idea thread
-            if not thread_note:
+            # FAST: conversation window only — no TurboVec dump.
+            if not thread_note and strategy != MODE_FAST:
                 rag_bits = (ke.get_routing_context(message, n_results=4) or "").strip()
-        try:
-            memory_bits = (ke._memory.get_full_summary(  # noqa: SLF001
-                mentioned or ke.get_active_project_name() or ""
-            ) or "").strip()
-        except Exception:
+        if strategy != MODE_FAST or mentioned:
+            try:
+                memory_bits = (ke._memory.get_full_summary(  # noqa: SLF001
+                    mentioned or ke.get_active_project_name() or ""
+                ) or "").strip()
+            except Exception:
+                memory_bits = ""
+        else:
             memory_bits = ""
     except Exception:
         pass
@@ -854,11 +914,8 @@ def handle_hud_request(
         f"RAG lives in `{root / 'rag'}`, orchestration in `{root / 'knowledge'}`, "
         f"TurboVec DB in `{root / '.vector_db'}`. "
         "Backend actions run in the Immortility terminal. "
-        "You CAN read local files and index Desktop projects into TurboVec via the HUD. "
-        "You CAN open sites and searches in Reyansh's Chrome (YouTube, Google, Netflix, etc.). "
         "When he pastes a URL and asks about it, answers must come from fetched page text "
         "(inspect_url) — never invent a project's purpose. "
-        "Never say you cannot open YouTube or the browser — the HUD does that for real. "
         "When he names a Desktop project (e.g. 'stocks app' = stocks_app), treat it as "
         "THAT codebase — summarize from retrieved local context, never invent a generic app. "
         f"Known projects: {known}. "
@@ -871,8 +928,15 @@ def handle_hud_request(
         "Never say you cannot access files or invent Microsoft/Medium web links "
         "when asked about YOUR vector DB / RAG / knowledge folder. "
         "Address him as Reyansh. For voice, keep answers shorter. "
+        "For chat, finish the answer — never stop mid-sentence. "
         f"{REPLY_FORMAT_RULES}"
     )
+    try:
+        from core.capabilities import capability_card
+
+        system += "\n\nCapability card (authoritative; do not invent others):\n" + capability_card()
+    except Exception:
+        pass
     if thread_note:
         system += f"\n\n{thread_note}"
     if project_note:
@@ -908,11 +972,21 @@ def handle_hud_request(
         pass
 
     hist = history_for_model(history, max_turns=16)
+    try:
+        from core.config import get_config
+
+        cfg = get_config()
+        tokens = (
+            cfg.fast_chat_max_tokens if strategy == MODE_FAST else cfg.chat_max_tokens
+        )
+    except Exception:
+        tokens = 2048
     reply = fast_chat(
         message,
         history=hist,
         system=system,
-        max_output_tokens=520,
+        max_output_tokens=tokens,
+        on_token=on_token,
     )
     try:
         update_focus_after_turn(message, reply, hist)

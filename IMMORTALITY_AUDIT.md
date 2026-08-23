@@ -103,13 +103,13 @@ flowchart TD
 | --- | --- |
 | Vision / multimodal (Qwen3-VL) | missing |
 | OCR (PaddleOCR) | missing |
-| PDF / DOCX / XLSX / PPTX pipelines | missing |
+| PDF / DOCX / XLSX / PPTX / CSV pipelines | shipped in 2B — `extract_document` uses PyMuPDF / python-docx / python-pptx / openpyxl / csv (not a document agent) |
 | Video (FFmpeg + frame sampling) | missing |
 | Image generation (FLUX) | missing |
 | MCP client/manager | missing (`tests/audit_report.py` already reports this) |
-| Git as first-class tools | missing — git only reachable through `run_command` |
-| Database tools (Postgres/MySQL/SQLite/Mongo/Redis) | missing |
-| Docker / DevOps tools | missing |
+| Git as first-class tools | shipped in 2B — `git_*` primitives via Tool Kernel → `CommandTool` (not a Git agent) |
+| Database tools (Postgres/MySQL/SQLite/Mongo/Redis) | partial — 2B ships **configured** SQLite / PostgreSQL / MongoDB only. No MySQL, no Redis, no arbitrary URLs |
+| Docker / DevOps tools | partial — 2B ships read-first inspect (`ps`/`images`/`inspect`/`logs`/`info`); `docker_rm` is destructive and never silent |
 | Computer control (mouse/keyboard/window) | partial — `tools/system_control.py`, no vision loop |
 | Skill registry / loader / matcher | missing — `skills/` holds one hardcoded LeetCode skill |
 | Hook system | missing — `core/event_bus.py` exists but is not an agent lifecycle hook bus |
@@ -233,22 +233,24 @@ immortility1/
 
 ## 7. Phased migration plan
 
-Phase 0 (this document) and Phase 1 are the approved slice. Everything below Phase 1 is
-roadmap, deliberately not implemented yet.
+See [IMMORTALITY_VISION.md](IMMORTALITY_VISION.md) and [IMMORTALITY_PHASES.md](IMMORTALITY_PHASES.md) for the frozen architecture and honest phase status.
+
+Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are also shipped. Phase 3 slice 3.0 (coding loop) is started. ECC skills/hooks and later phases remain roadmap.
 
 | Phase | Deliverable | State |
 | --- | --- | --- |
-| 0 | This audit; correct the stale architecture doc | in this change |
-| 1 | `models/` — ModelSpec, registry, VRAM monitor, capability router, manager, `doctor` | in this change |
-| 2 | Tool system upgrade: first-class git, docs (PDF/DOCX/XLSX/PPTX), OCR, database, Docker; per-tool permission metadata | roadmap |
-| 3 | ECC-native layer: skill registry/matcher, rules, lifecycle hooks, scoped agent roles | roadmap |
-| 4 | Autonomous coding loop: TDD red/green, fresh-context reviewer, bounded build-fix | roadmap |
-| 5 | Multimodal: Qwen3-VL adapter, PaddleOCR, FFmpeg video sampling, image generation | roadmap |
-| 6 | Memory/RAG/context: BGE-M3 migration with full reindex, reranker on by default, token budgets | roadmap |
-| 7 | Computer agent: screenshot to vision to reasoning to action to verification | roadmap |
-| 8 | Security: permission modes, AgentShield-style scanners, prompt-injection separation, sandboxing | roadmap |
-| 9 | Evaluation harness with success rate, latency, VRAM, retries per category | roadmap |
-| 10 | Optimisation: caching, graceful degradation, model-switch latency | roadmap |
+| 0 | This audit | shipped |
+| 1 | `models/` registry, VRAM, doctor | shipped |
+| H | Harness foundation (`core/harness.py`) | shipped |
+| K | Execution kernel, FAST/AGENT/BACKGROUND, streaming, warm/cold | shipped |
+| 2A | Capability card/report, permissions, search states | shipped |
+| 2B | Git / documents / Docker inspect / configured DBs / command hardening | shipped |
+| 3 | Autonomous coding loop over existing kernels | started — slice 3.0 (`core/coding_engine.py`). Not complete: no fresh-context reviewer, no ECC skills/hooks |
+| 4 | Fresh-context review + ECC skills / rules / hooks | roadmap |
+| 5 | Multimodal VL/OCR/video | roadmap |
+| 6 | Memory/RAG budgets; BGE-M3 only with full reindex | roadmap |
+| 7 | Full eval harness + novel-task generalization | roadmap |
+| 8–10 | Training data, LoRA, continuous improve | roadmap |
 
 ### Out of scope for the current change
 

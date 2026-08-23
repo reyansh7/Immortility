@@ -13,7 +13,11 @@ from core.llm import chat, active_backend, local_model, _provider
 
 from core.agent_state import AgentState
 from core.paths import normalize_path_key, sanitize_llm_path
-from core.pending_action import needs_confirmation, format_confirmation_message
+from core.pending_action import (
+    format_confirmation_message,
+    needs_confirmation,
+    with_user_confirmation,
+)
 from core.research_context import ResearchContext
 from tools.tool_registry import ToolRegistry
 
@@ -27,6 +31,16 @@ MUTATING_TOOLS = frozenset({
 })
 
 EDIT_TOOLS = frozenset(MUTATING_TOOLS)
+
+
+def _kernel_chat(messages: list, *, role: str = "brain", **kwargs):
+    """Model call via the execution kernel (traces + timeouts)."""
+    from core.execution_kernel import get_kernel
+
+    result = get_kernel().run_model(messages, role=role, **kwargs)
+    if not result.ok:
+        raise RuntimeError(result.error or "model failed")
+    return result.value
 
 
 def _log_event(
@@ -106,9 +120,7 @@ async def agent_step(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
-    response = await asyncio.to_thread(
-        chat, model="auto", messages=messages, think=False
-    )
+    response = await asyncio.to_thread(_kernel_chat, messages, role="brain")
     content = response["message"]["content"]
     if persist_history:
         state = AgentState()
@@ -251,7 +263,7 @@ async def resume_confirmed_pending(pending: dict) -> str:
 
     registry = ToolRegistry()
     registry.setup()
-    result = await registry.execute(tool_name, args)
+    result = await registry.execute(tool_name, with_user_confirmation(tool_name, args))
     preview = result if isinstance(result, str) and len(result) < 2000 else str(result)[:2000]
 
     resume_history = list((pending or {}).get("internal_history") or [])
@@ -344,6 +356,19 @@ async def execute_action(
         experience_block = ""
 
     ctx_for_prompt = context_override[:5000] if context_override else "No extra retrieved context provided."
+    try:
+        from tools.git_tool import wants_repo_changes
+
+        if user_input and wants_repo_changes(user_input):
+            ctx_for_prompt = (
+                "LOCAL REPO CHANGE QUESTION. Ignore unrelated RAG snippets. "
+                "First call git_status with cwd=" + str(get_repo_root()) + ", "
+                "then git_diff. DONE must list only paths those tools returned. "
+                "Never invent files such as scripts/run_agents.py.\n\n"
+                + ctx_for_prompt
+            )
+    except Exception:
+        pass
     if experience_block:
         ctx_for_prompt = f"{ctx_for_prompt}\n\n{experience_block}"
 
@@ -435,7 +460,7 @@ async def execute_action(
         try:
             summary_tokens = get_config().action_summary_max_tokens
         except Exception:
-            summary_tokens = 700
+            summary_tokens = 2048
         prompt = (
             f"You analyzed a codebase via tools. Write a clear plain-text report for {who}.\n"
             f"Original request: {user_input or '(analysis)'}\n"
@@ -453,8 +478,8 @@ async def execute_action(
                     {
                         "role": "system",
                         "content": (
-                            "You are Immortility. Summarize code investigation results "
-                            "briefly in plain text. No **bold**, no # headings."
+                            "You are Immortility. Write a complete code investigation report "
+                            "in plain text. Do not stop mid-sentence. No **bold**, no # headings."
                         ),
                     },
                     {"role": "user", "content": prompt},
@@ -489,14 +514,19 @@ async def execute_action(
     for step in range(max_steps):
         messages = [{"role": "system", "content": tool_prompt}] + internal_history
         try:
-            response = await asyncio.to_thread(
-                chat,
-                model=current_model if using_local_fallback else "auto",
-                messages=messages,
-                think=False,
-                force_provider="local" if using_local_fallback else None,
-                role=llm_role,
-            )
+            if using_local_fallback:
+                response = await asyncio.to_thread(
+                    chat,
+                    model=current_model,
+                    messages=messages,
+                    think=False,
+                    force_provider="local",
+                    role=llm_role,
+                )
+            else:
+                response = await asyncio.to_thread(
+                    _kernel_chat, messages, role=llm_role
+                )
         except Exception as exc:
             msg = f"LLM error: {exc}. Backend={active_backend()}"
             console.print(f"[red]{msg}[/red]")
@@ -659,7 +689,15 @@ async def execute_action(
                 return format_confirmation_message(tool_name, args)
 
             console.print(f"\n[cyan][{step + 1}] {tool_name}[/cyan]")
-            result = await registry.execute(tool_name, args)
+            try:
+                from core.execution_kernel import get_kernel
+
+                kres = await get_kernel().run_tool(tool_name, args)
+                result = kres.value if kres.ok else json.dumps(
+                    {"status": "error", "message": kres.error or "tool failed"}
+                )
+            except Exception:
+                result = await registry.execute(tool_name, args)
 
             failed = _tool_call_failed(result)
             if not failed and tool_name == "read_file" and args.get("path"):

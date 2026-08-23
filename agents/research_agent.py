@@ -1,6 +1,9 @@
 import json
 import re
 
+from dataclasses import dataclass, field
+from typing import Any
+
 from rich.console import Console
 
 from core.agent_state import AgentState
@@ -20,6 +23,17 @@ from tools.leetcode_tool import (
 console = Console()
 
 
+@dataclass
+class ResearchResult:
+    """Minimal URL-preserving research outcome. Not a citation engine."""
+
+    answer: str
+    sources: list[dict[str, str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"answer": self.answer, "sources": list(self.sources)}
+
+
 class ResearchAgent:
     """
     Gathers information via tools. Does NOT generate final answers or solutions.
@@ -30,6 +44,7 @@ class ResearchAgent:
         self.state = AgentState()
         self.registry = ToolRegistry()
         self.registry.setup()
+        self.last_result: ResearchResult | None = None
 
     async def execute(self, query: str) -> ResearchContext:
         console.print(f"\n[bold magenta]--- Research Agent ---[/bold magenta]")
@@ -77,17 +92,19 @@ class ResearchAgent:
         llm_answer = ""
         if texts:
             try:
+                from core.config import get_config
                 from core.llm import fast_chat
 
                 bundle = "\n\n".join(texts)[:12000]
+                tokens = get_config().chat_max_tokens
                 llm_answer = fast_chat(
                     query,
                     extra_context=(
                         "Answer ONLY from this fetched page content. "
-                        "Do not invent. Cite the URL.\n\n"
+                        "Do not invent. Cite the URL. Finish the answer; never stop mid-sentence.\n\n"
                         f"{bundle}"
                     ),
-                    max_output_tokens=520,
+                    max_output_tokens=tokens,
                 )
             except Exception:
                 llm_answer = ""
@@ -101,6 +118,10 @@ class ResearchAgent:
             summary=synth.answer,
         )
         self.state.set_research_context(ctx)
+        self.last_result = ResearchResult(
+            answer=synth.answer,
+            sources=[{"url": s.url, "title": s.title} for s in sources if s.url],
+        )
         return ctx
 
     async def _run_tool(self, tool: str, args: dict | None = None) -> dict:
@@ -219,13 +240,20 @@ class ResearchAgent:
 
         if not results:
             synth = synthesize_with_citations(query, [])
+            search_state = (search.get("result") or {}).get("search_state") or search.get("search_state")
+            note = ""
+            if search_state == "SEARCH_EXECUTED_ZERO_RESULTS":
+                note = " Search ran and found nothing."
+            elif search_state == "SEARCH_UNAVAILABLE":
+                note = " Search was unavailable."
             ctx = ResearchContext(
                 query=query,
                 sources=[],
-                summary=synth.answer,
+                summary=(synth.answer + note).strip(),
                 extracted_text=synth.answer,
             )
             self.state.set_research_context(ctx)
+            self.last_result = ResearchResult(answer=ctx.summary, sources=[])
             return ctx
 
         sources: list[ResearchSource] = []
@@ -283,18 +311,21 @@ class ResearchAgent:
 
         llm_answer = ""
         try:
+            from core.config import get_config
             from core.llm import fast_chat
 
             bundle = "\n\n".join(texts)[:7000]
+            tokens = get_config().chat_max_tokens
             llm_answer = fast_chat(
                 query,
                 extra_context=(
                     "Synthesize an answer ONLY from these web sources. "
                     "Include source URLs inline or in a Sources list. "
-                    "If sources are insufficient, say so — do not invent.\n\n"
+                    "If sources are insufficient, say so — do not invent. "
+                    "Finish the answer; never stop mid-sentence.\n\n"
                     f"{bundle}"
                 ),
-                max_output_tokens=400,
+                max_output_tokens=tokens,
             )
         except Exception:
             llm_answer = ""
@@ -333,5 +364,9 @@ class ResearchAgent:
         console.print(
             f"[green]Research complete.[/green] "
             f"{len(sources)} sources, {len(ctx.extracted_text)} chars."
+        )
+        self.last_result = ResearchResult(
+            answer=answer,
+            sources=[{"url": s.url, "title": s.title} for s in sources if s.url],
         )
         return ctx

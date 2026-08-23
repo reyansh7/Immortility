@@ -71,8 +71,8 @@ model without editing config.
 | `IMMORTILITY_LLM_PROVIDER` | `ollama`, `vllm`, `openai`, `gemini`, `auto` |
 | `OLLAMA_MODEL` / `VLLM_MODEL` / `OPENAI_MODEL` | brain model id for that runtime |
 | `IMMORTILITY_FALLBACK_MODEL` | secondary chat model on the same endpoint |
-| `OLLAMA_CODE_MODEL` | enables the `code` specialist |
-| `OLLAMA_VISION_MODEL` | enables the `vision` role |
+| `OLLAMA_CODE_MODEL` | optional coding specialist. Recommended later: a Qwen3-Coder 8B-class Ollama tag that fits 8 GB. Unset = brain fallback. Never auto-pull. |
+| `OLLAMA_VISION_MODEL` | optional vision specialist. Recommended later: Qwen3-VL-8B-class. Unset = vision **unavailable** (Qwythos cannot see). Never auto-pull. |
 | `IMMORTILITY_CODE_LARGE_MODEL` | registers a 30B-class coder (needs ~19 GB) |
 | `IMMORTILITY_NUM_CTX` | explicit context window, clamped to 32768 |
 | `RERANK_ENABLED` / `RERANK_MODEL` | retrieval reranker |

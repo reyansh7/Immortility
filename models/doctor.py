@@ -186,6 +186,24 @@ def run_checks() -> tuple[list[Check], int]:
     routes, routes_failed = _routing_checks()
     checks.extend(fleet)
     checks.extend(routes)
+    try:
+        from core.capabilities import get_capability
+
+        vis = get_capability("vision")
+        if vis and not vis.available:
+            checks.append(Check("Capability: vision", WARN, vis.detail))
+        web = get_capability("web_search")
+        if web and web.available:
+            checks.append(Check("Capability: web_search", OK, web.detail))
+        checks.append(Check("Capabilities", INFO, "see /capabilities"))
+    except Exception as exc:
+        checks.append(Check("Capabilities", WARN, str(exc)))
+    try:
+        from core.harness import last_turn_summary
+
+        checks.append(Check("Last turn", INFO, last_turn_summary()))
+    except Exception:
+        pass
 
     exit_code = 1 if (fleet_failed or routes_failed) else 0
     return checks, exit_code

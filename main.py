@@ -125,6 +125,50 @@ def _looks_like_fast_chat(text: str) -> bool:
     return True
 
 
+def is_import_docs_command(text: str) -> bool:
+    """True for `/import-docs` with or without arguments."""
+    low = (text or "").strip().lower()
+    return low == "/import-docs" or low.startswith("/import-docs ")
+
+
+def parse_import_docs_args(text: str) -> tuple[str, str] | None:
+    """Return (collection_name, path) or None when usage should be shown."""
+    rest = (text or "").strip()
+    if rest.lower().startswith("/import-docs"):
+        rest = rest[len("/import-docs"):].strip()
+    if not rest:
+        return None
+    parts = rest.split(None, 1)
+    if len(parts) != 2:
+        return None
+    name, path = parts[0].strip(), parts[1].strip().strip('"').strip("'")
+    if not name or not path:
+        return None
+    return name, path
+
+
+_KNOWN_SLASH = frozenset({
+    "/auto", "/talk", "/voice", "/listen", "/hud", "/doctor", "/models",
+    "/capabilities", "/caps", "/clear", "/open", "/memory", "/import-docs",
+    "/projects", "/exit", "/quit",
+})
+
+
+def unknown_slash_command(text: str) -> str | None:
+    """If this is an unhandled `/command`, return a usage string; else None."""
+    low = (text or "").strip().lower()
+    if not low.startswith("/"):
+        return None
+    first = low.split()[0]
+    if first in _KNOWN_SLASH or first.startswith("/open"):
+        return None
+    return (
+        f"Unknown command: {first}\n"
+        "Try /open <path>, /import-docs <name> <path>, /memory, /projects, "
+        "/doctor, /capabilities, /hud, /talk, /clear, /exit"
+    )
+
+
 # Back-compat aliases
 _HEAVY_CHAT_HINTS = HEAVY_CHAT_HINTS
 _STOP_PHRASES = STOP_PHRASES
@@ -414,14 +458,21 @@ async def handle_pending_coding_plan(user_input: str) -> bool:
         console.print(f"[bold green]{result.message}[/bold green]")
     else:
         console.print(f"[red]{result.message}[/red]")
-        console.print("[yellow]Falling back to Action Engine...[/yellow]")
+        console.print("[yellow]Falling back to coding loop (Action Engine coder)…[/yellow]")
+        from core.coding_engine import run_coding_loop
+
         task = (
             f"Project root: {active.path}\n"
             f"Request: {request}\n"
             f"Plan:\n{planner_hint[:4000]}\n"
             f"Apply all file changes. Read each file before editing."
         )
-        await execute_action(task, require_edits=True)
+        loop = await run_coding_loop(
+            task,
+            cwd=active.path,
+            auto_confirm=False,
+        )
+        console.print(loop.message)
     return True
 
 
@@ -480,7 +531,9 @@ async def _run_coding_workflow(
         console.print(f"[bold green]{result.message}[/bold green]")
     else:
         console.print(f"[red]{result.message}[/red]")
-        console.print("[yellow]Falling back to Action Engine...[/yellow]")
+        console.print("[yellow]Falling back to coding loop (Action Engine coder)…[/yellow]")
+        from core.coding_engine import run_coding_loop
+
         task = (
             f"Project root: {project_path}\n"
             f"Request: {user_request}\n"
@@ -488,7 +541,13 @@ async def _run_coding_workflow(
             f"Apply changes using edit_file, create_file, insert_after tools. "
             f"Read each file before editing. Use src/app/ paths for Next.js App Router."
         )
-        await execute_action(task, require_edits=True)
+        loop = await run_coding_loop(
+            task,
+            cwd=project_path,
+            context_override=context[:6000],
+            auto_confirm=False,
+        )
+        console.print(loop.message)
 
 
 # ── Workflow execution (extended with RAG context) ──────────────────
@@ -1000,7 +1059,7 @@ async def main():
     _voice_enabled = False
 
     completer = WordCompleter(
-        ['/auto', '/talk', '/voice', '/listen', '/hud', '/doctor', '/clear', '/open', '/memory', '/import-docs', '/projects', '/exit'],
+        ['/auto', '/talk', '/voice', '/listen', '/hud', '/doctor', '/capabilities', '/clear', '/open', '/memory', '/import-docs', '/projects', '/exit'],
         ignore_case=True,
     )
     session = PromptSession(completer=completer)
@@ -1172,6 +1231,15 @@ async def main():
                     console.print(f"[red]Doctor failed: {exc}[/red]")
                 continue
 
+            if user_lower in ("/capabilities", "/caps"):
+                try:
+                    from core.capabilities import capability_report
+
+                    console.print(Panel(Text(capability_report()), title="Capabilities", border_style="cyan"))
+                except Exception as exc:
+                    console.print(f"[red]Capabilities failed: {exc}[/red]")
+                continue
+
             if user_lower == "/memory":
                 try:
                     engine = _get_engine()
@@ -1188,10 +1256,10 @@ async def main():
                     console.print(f"[red]Error: {exc}[/red]")
                 continue
 
-            if user_lower.startswith("/import-docs "):
-                parts = user_stripped[13:].strip().split(" ", 1)
-                if len(parts) == 2:
-                    name, path = parts
+            if is_import_docs_command(user_stripped):
+                parsed = parse_import_docs_args(user_stripped)
+                if parsed:
+                    name, path = parsed
                     try:
                         engine = _get_engine()
                         console.print(f"[cyan]Importing docs '{name}' from {path}...[/cyan]")
@@ -1201,6 +1269,9 @@ async def main():
                         console.print(f"[red]Error: {exc}[/red]")
                 else:
                     console.print("[yellow]Usage: /import-docs <name> <path>[/yellow]")
+                    console.print(
+                        "[dim]Example: /import-docs fastapi C:\\docs\\fastapi[/dim]"
+                    )
                 continue
 
             if user_lower == "/projects":
@@ -1217,11 +1288,41 @@ async def main():
                     console.print(f"[red]Error: {exc}[/red]")
                 continue
 
+            unknown = unknown_slash_command(user_stripped)
+            if unknown:
+                console.print(f"[yellow]{unknown}[/yellow]")
+                continue
+
             if await handle_pending_coding_plan(user_stripped):
                 continue
 
             if await handle_pending_action(user_stripped):
                 continue
+
+            try:
+                from core.capabilities import answer_capability_question, wants_capability_report
+
+                if wants_capability_report(user_stripped):
+                    report = answer_capability_question(user_stripped)
+                    console.print(
+                        Panel(Markdown(report), title="Capabilities", border_style="cyan")
+                    )
+                    await speak_reply(report)
+                    continue
+            except Exception as exc:
+                console.print(f"[red]Capability report failed: {exc}[/red]")
+
+            try:
+                from tools.git_tool import answer_repo_changes, wants_repo_changes
+
+                if wants_repo_changes(user_stripped):
+                    console.print("[dim]Reading git status / diff (no RAG)…[/dim]")
+                    report = await asyncio.to_thread(answer_repo_changes, user_stripped)
+                    console.print(Panel(Markdown(report), title="Git changes", border_style="cyan"))
+                    await speak_reply(report)
+                    continue
+            except Exception as exc:
+                console.print(f"[red]Git change report failed: {exc}[/red]")
 
             # Fast path FIRST: desktop/projects scan — no RAG, no Knowledge Engine, no Gemini wait
             from core.desktop_scanner import spoken_projects_brief, wants_projects_scan
@@ -1236,12 +1337,15 @@ async def main():
             # Fast conversational path: skip RAG/routing for short casual chat
             if _looks_like_fast_chat(user_stripped):
                 from core.config import get_config
+                from core.harness import begin_turn
+                from core.execution_mode import MODE_FAST
                 from memory.outcome_memory import get_outcome_memory, lessons_for_prompt
 
+                begin_turn(mode=MODE_FAST)
                 state.mode = "CHAT"
                 state.save()
-                console.print("\n[bold blue][CHAT][/bold blue] [dim]fast[/dim]")
-                with console.status("[bold cyan]🧠 Thinking...[/bold cyan]", spinner="bouncingBar"):
+                console.print("\n[bold blue][CHAT][/bold blue] [dim]fast / streaming[/dim]")
+                with console.status("[bold cyan]Streaming…[/bold cyan]", spinner="bouncingBar"):
                     from core.llm import fast_chat
 
                     hist = [
@@ -1301,6 +1405,12 @@ async def main():
                         user_stripped, routing_context=orchestrated_context
                     )
                     route = await classify_route(user_stripped, routing_context=orchestrated_context)
+                    from core.router import classify_strategy
+                    from core.harness import begin_turn
+
+                    strategy = classify_strategy(user_stripped, category=route)
+                    begin_turn(mode=strategy)
+                    console.print(f"[dim]strategy={strategy}[/dim]")
 
                 # Shared source policy: escalate to web research when needed
                 if source_decision.source == "WEB" and route in ("CHAT", "RESEARCH_TASK"):
@@ -1399,7 +1509,25 @@ async def main():
                             action_context = _get_engine().get_action_context(user_stripped)
                         except Exception:
                             action_context = ""
-                        await execute_action(user_stripped, context_override=action_context)
+                        if is_coding_intent(user_stripped):
+                            from core.coding_engine import run_coding_loop
+
+                            loop = await run_coding_loop(
+                                user_stripped,
+                                context_override=action_context,
+                                auto_confirm=False,
+                            )
+                            console.print(
+                                Panel(
+                                    Markdown(loop.message),
+                                    title="Coding loop",
+                                    border_style="cyan",
+                                )
+                            )
+                        else:
+                            await execute_action(
+                                user_stripped, context_override=action_context
+                            )
 
                 elif route == "PROJECT":
                     state.mode = "PROJECT"

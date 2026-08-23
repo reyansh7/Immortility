@@ -98,6 +98,7 @@ class ModelManager:
         self._registry = registry
         self._lock = threading.Lock()
         self._resident_heavy: ModelSpec | None = None
+        self._last_used: dict[str, float] = {}
 
     @classmethod
     def get(cls) -> "ModelManager":
@@ -120,6 +121,21 @@ class ModelManager:
     def resident_heavy(self) -> ModelSpec | None:
         with self._lock:
             return self._resident_heavy
+
+    def last_used_at(self, spec_id: str) -> float | None:
+        with self._lock:
+            return self._last_used.get(spec_id)
+
+    def is_warm(self, spec: ModelSpec) -> bool:
+        with self._lock:
+            current = self._resident_heavy
+            return current is not None and current.model_id == spec.model_id
+
+    def _mark_used(self, spec: ModelSpec) -> None:
+        import time
+
+        with self._lock:
+            self._last_used[spec.id] = time.time()
 
     # ── Health ──────────────────────────────────────────────────────────
 
@@ -211,9 +227,6 @@ class ModelManager:
         if spec.heavy:
             with self._lock:
                 current = self._resident_heavy
-                # Compare model ids, not spec ids: two roles can legitimately
-                # point at the same weights, and evicting those would only
-                # force a needless reload.
                 if current is not None and current.model_id != spec.model_id:
                     evicted = current.id
                 self._resident_heavy = spec
@@ -223,6 +236,7 @@ class ModelManager:
                     self.unload(current_spec)
 
         health = self.health(spec) if probe else None
+        self._mark_used(spec)
         message = f"role={role} -> {spec.model_id}"
         if evicted:
             message += f" (evicted {evicted})"

@@ -67,6 +67,7 @@ Useful commands inside the session:
 | `/clear` | Clear conversation / pending state |
 | `/hud` | Re-open the red Immortility JARVIS-style HUD in your browser |
 | `/doctor` | Model fleet preflight: GPU/VRAM, config, per-model health, routing |
+| `/capabilities` | Deterministic capability report (not LLM memory) |
 | `/talk` or `/voice` | Continuous speech-to-speech (Whisper → local LLM → male Windows TTS). Say “stop” to leave. |
 | `/listen` | One-shot mic input into the normal text loop |
 | `/exit` | Quit |
@@ -121,6 +122,13 @@ LLM  ←── OpenAI-compatible HTTP (vLLM in WSL2 / Ollama / custom)
 
 Action Engine `DONE` path runs a verification gate (syntax / build / tests + semantic review) before reporting success.
 
+Phase 2B tools are primitives, not agents. Git/Docker go through the same `CommandTool` engine as `run_command` (timeout, cwd, output limits, cancel, traces, permissions). Documents use real parsers (`extract_document`). Databases only accept **named** connections from `config/databases.yaml` or `IMMORTILITY_SQLITE_PATH` / `IMMORTILITY_POSTGRES_URL` / `IMMORTILITY_MONGO_URL`. Destructive git (force-push, `reset --hard`, delete branch) never runs silently.
+
+```
+User → router (FAST/AGENT/BACKGROUND) → discover_tools / planner
+     → Tool Kernel → Execution Kernel → CommandTool (one subprocess path)
+```
+
 Models are chosen per **role** (`brain`, `code`, `vision`, `embed`, `asr`, `tts`) by the
 model layer in `models/`, which is VRAM-aware and keeps one heavy model resident at a
 time. See [`IMMORTALITY_MODELS.md`](IMMORTALITY_MODELS.md); the full architecture audit
@@ -148,7 +156,12 @@ and roadmap are in [`IMMORTALITY_AUDIT.md`](IMMORTALITY_AUDIT.md).
 | `RERANK_ENABLED` | `1` to enable CrossEncoder rerank (CPU, default off) |
 | `WHISPER_MODEL` | `small.en` (default) is far more accurate than `base`/`tiny` |
 | `WHISPER_DEVICE` | `cpu` (default) or `cuda`. GPU is probed at startup and falls back to CPU if unusable |
-| `IMMORTILITY_CHROME_PROFILE` | Force which Chrome profile opens sites |
+| `IMMORTILITY_CMD_TIMEOUT` | Default command timeout in seconds (kill on expiry; default 60) |
+| `IMMORTILITY_CMD_MAX_OUTPUT` | Max stdout/stderr chars from a command (default 200000) |
+| `IMMORTILITY_GIT_ALLOWED_ROOTS` | Extra git roots (os.pathsep-separated) besides the Immortility repo and active project |
+| `IMMORTILITY_SQLITE_PATH` | Optional named SQLite connection `sqlite_default` |
+| `IMMORTILITY_POSTGRES_URL` | Optional named Postgres connection `postgres_default` (read-only unless configured) |
+| `IMMORTILITY_MONGO_URL` | Optional named Mongo connection `mongo_default` |
 
 Copy `.env.example` → `.env`. `.env` is gitignored.
 

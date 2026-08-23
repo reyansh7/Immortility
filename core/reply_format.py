@@ -15,8 +15,11 @@ def reply_format_rules(user_name: str | None = None) -> str:
         except Exception:
             name = "the user"
     return (
-        "Write like a person talking in chat: short sentences, plain text. "
-        "Default shape: one short opening paragraph, then a short bullet list "
+        "Write like a person talking in chat: plain text. "
+        "Greetings and yes/no stay short. For reports, capabilities, file lists, "
+        "or anything that needs detail, write until the answer is complete — "
+        "never stop mid-sentence or mid-bullet. "
+        "Default shape: a short opening paragraph, then a bullet list "
         "using lines that start with '- ' for the key points. "
         f"If {name} asks for only points / bullets / a list, use bullets with no paragraph. "
         "If they ask for paragraph only / prose only / no bullets, use paragraphs with no list. "

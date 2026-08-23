@@ -220,12 +220,17 @@ class _HudHandler(BaseHTTPRequestHandler):
             "/hud/stop",
             "/hud/face",
             "/hud/confirm",
+            "/hud/upload",
             "/api/todos",
         }:
             self.send_error(404)
             return
         if not _check_token(self):
             self._json(401, {"error": "unauthorized — restart Immortility HUD"})
+            return
+
+        if path == "/hud/upload":
+            self._handle_upload()
             return
 
         data = self._read_json_body()
@@ -339,6 +344,53 @@ class _HudHandler(BaseHTTPRequestHandler):
             return
         self._handle_chat({"message": msg, "speak": bool(data.get("speak", True))})
 
+    def _handle_upload(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        from tools.hud_upload import MAX_FILES, MAX_REQUEST_BYTES, parse_multipart_files, save_and_parse
+
+        if length <= 0:
+            self._json(400, {"error": "empty upload"})
+            return
+        if length > MAX_REQUEST_BYTES:
+            mb = MAX_REQUEST_BYTES // (1024 * 1024)
+            self._json(413, {"error": f"Upload too large (max {mb} MB total)."})
+            return
+        body = self.rfile.read(length)
+        ctype = self.headers.get("Content-Type") or ""
+        try:
+            files = parse_multipart_files(ctype, body)
+        except Exception as exc:
+            logger.warning("multipart parse failed: %s", exc)
+            self._json(400, {"error": "Could not read the upload. Try one file at a time."})
+            return
+        if not files:
+            self._json(400, {"error": "No files in upload."})
+            return
+        if len(files) > MAX_FILES:
+            self._json(400, {"error": f"Attach at most {MAX_FILES} files at once."})
+            return
+        results = []
+        errors = []
+        for name, blob in files:
+            try:
+                rec = save_and_parse(name, blob)
+            except Exception as exc:
+                logger.warning("upload parse failed %s: %s", name, exc)
+                errors.append(f"Could not parse {name}: {exc}")
+                continue
+            if rec.get("status") == "success":
+                results.append(rec)
+            else:
+                errors.append(rec.get("message") or f"Failed: {name}")
+        self._json(
+            200 if results else 400,
+            {
+                "ok": bool(results),
+                "files": results,
+                "errors": errors,
+            },
+        )
+
     def _handle_chat(self, data: dict[str, Any]) -> None:
         import time
 
@@ -346,11 +398,26 @@ class _HudHandler(BaseHTTPRequestHandler):
 
         _chat_cancel.clear()
         message = str(data.get("message") or "").strip()
+        attach_ids = [
+            str(x).strip()
+            for x in (data.get("attachments") or [])
+            if str(x).strip()
+        ]
+        attach_ctx = ""
+        if attach_ids:
+            try:
+                from tools.hud_upload import compose_attachment_context
+
+                attach_ctx = compose_attachment_context(attach_ids)
+            except Exception as exc:
+                logger.debug("attachment context: %s", exc)
+        if not message and attach_ctx:
+            message = "Read the attached file(s) and answer based on their contents."
         if not message:
             self._json(400, {"error": "empty message"})
             return
 
-        key = message.lower()
+        key = message.lower() + ("|" + ",".join(attach_ids) if attach_ids else "")
         # Never collapse yes/no — confirmations must re-enter the pending-action path.
         try:
             from core.pending_action import is_approval, is_rejection
@@ -369,6 +436,10 @@ class _HudHandler(BaseHTTPRequestHandler):
                 self._json(200, {"reply": _last_chat_reply, "deduped": True})
                 return
 
+        model_message = message
+        if attach_ctx:
+            model_message = f"{message}\n\n{attach_ctx}"
+
         _term(f"User: {message[:200]}", "white")
         with _history_lock:
             _chat_history.append({"role": "user", "content": message})
@@ -384,10 +455,27 @@ class _HudHandler(BaseHTTPRequestHandler):
             pass
 
         set_face("thinking")
+        stream = bool(data.get("stream"))
+        tokens: list[str] = []
+
+        def _on_token(piece: str) -> None:
+            tokens.append(piece)
+            try:
+                from tools.hud_state import update_hud
+
+                preview = "".join(tokens)[-80:]
+                update_hud(status=f"STREAM {preview}")
+            except Exception:
+                pass
+
         try:
             from tools.hud_agent import handle_hud_request
 
-            reply = handle_hud_request(message, history=history_snapshot)
+            reply = handle_hud_request(
+                model_message,
+                history=history_snapshot,
+                on_token=_on_token if stream else None,
+            )
             try:
                 from core.reply_format import polish_reply
 
@@ -774,7 +862,7 @@ def open_hud(*, port: int = HUD_PORT, greet: bool = True) -> str:
                     f"--app={url}",
                     f"--window-size={HUD_WIDTH},{HUD_HEIGHT}",
                     "--window-position=60,40",
-                    "--disable-features=TranslateUI",
+                    "--disable-features=TranslateUI,msEdgeUploadFromMobile",
                     "--no-first-run",
                 ],
                 stdout=subprocess.DEVNULL,

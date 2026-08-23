@@ -25,19 +25,90 @@ class ToolRegistry:
             cls._instance._setup_done = False
         return cls._instance
 
-    def register(self, name: str, func: Callable, description: str, args_schema: dict) -> None:
+    def register(
+        self,
+        name: str,
+        func: Callable,
+        description: str,
+        args_schema: dict,
+        permissions: dict | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        from core.capabilities import permissions_for_tool
+
+        perms = permissions or permissions_for_tool(name)
         self._tools[name] = {
             "func": func,
             "description": description,
             "args_schema": args_schema,
+            "permissions": perms,
+            "tags": list(tags or []),
         }
 
-    def get_tool_prompt(self) -> str:
-        prompt = "Available tools:\n\n"
-        for name, info in self._tools.items():
+    def get_tool_prompt(self, query: str | None = None) -> str:
+        """Catalog for the agent prompt.
+
+        FAST path never calls this. AGENT gets name(args)+one-line descriptions.
+        Use discover_tools for a filtered subset with full schemas.
+        """
+        tools = self._tools
+        if query:
+            names = {row["name"] for row in self.discover(query)}
+            tools = {k: v for k, v in self._tools.items() if k in names}
+        prompt = (
+            "Available tools (call discover_tools with a query like 'git' or 'pdf' "
+            "to load a subset with full schemas):\n\n"
+        )
+        for name, info in tools.items():
             args_list = ", ".join(info["args_schema"].keys())
-            prompt += f"- {name}({args_list}): {info['description']}\n"
+            perms = info.get("permissions") or {}
+            tags = []
+            if perms.get("read"):
+                tags.append("read")
+            if perms.get("write"):
+                tags.append("write")
+            if perms.get("network"):
+                tags.append("network")
+            if perms.get("destructive"):
+                tags.append("destructive")
+            extra = info.get("tags") or []
+            tags.extend(t for t in extra if t not in tags)
+            tag_s = f" [{', '.join(tags)}]" if tags else ""
+            prompt += f"- {name}({args_list}){tag_s}: {info['description']}\n"
         return prompt
+
+    def discover(self, query: str = "", tags: list[str] | None = None) -> list[dict]:
+        """Find primitives by name/description/tag. No extra model call."""
+        q = (query or "").strip().lower()
+        words = [w for w in q.replace(",", " ").split() if w]
+        wanted = {t.lower() for t in (tags or []) if t}
+        out = []
+        for name, info in self._tools.items():
+            tool_tags = [str(t).lower() for t in (info.get("tags") or [])]
+            blob = " ".join([name, info.get("description") or "", " ".join(tool_tags)]).lower()
+            if wanted and not wanted.intersection(tool_tags):
+                continue
+            if words and not all(word in blob for word in words):
+                continue
+            out.append(
+                {
+                    "name": name,
+                    "description": info["description"],
+                    "args_schema": info["args_schema"],
+                    "permissions": info.get("permissions") or {},
+                    "tags": info.get("tags") or [],
+                }
+            )
+        return out
+
+    def get_permissions(self, name: str) -> dict:
+        info = self._tools.get(name) or {}
+        perms = info.get("permissions")
+        if perms:
+            return dict(perms)
+        from core.capabilities import permissions_for_tool
+
+        return permissions_for_tool(name)
 
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
@@ -107,7 +178,19 @@ class ToolRegistry:
         self.register("read_file", FileTool.read_file, "Read file — content is raw text; numbered has line numbers for replace_lines", {"path": "string"})
         self.register("write_file", FileTool.write_file, "Write content to a file", {"path": "string", "content": "string"})
         self.register("list_directory", FileTool.list_directory, "List directory contents", {"path": "string"})
-        self.register("run_command", CommandTool.run_command, "Run a shell command", {"cmd": "string", "timeout": "float (optional)"})
+        self.register(
+            "run_command",
+            CommandTool.run_command,
+            "Run a shell command through the single execution engine (timeout/cwd/limits/cancel/trace).",
+            {
+                "cmd": "string",
+                "timeout": "float (optional)",
+                "cwd": "string (optional)",
+                "max_output": "integer (optional)",
+                "background": "bool (optional)",
+            },
+            tags=["terminal"],
+        )
         self.register("open_application", AppTool.open_application, "Open a local application", {"name": "string", "path": "string (optional)"})
         self.register("get_system_status", SystemTool.get_system_status, "Get overall system CPU, memory, and disk usage", {})
         self.register("list_top_processes", SystemTool.list_top_processes, "List top system processes", {"sort_by": "string (memory|cpu)", "limit": "integer"})
@@ -142,9 +225,231 @@ class ToolRegistry:
         self.register("apply_patch", FileTool.apply_patch, "Apply a patch to a file", {"path": "string", "patch": "string"})
         self.register("validate_patch", FileTool.validate_patch, "Validate a patch syntax", {"path": "string"})
 
+        from tools.git_tool import GitTool
+        from tools.docker_tool import DockerTool
+        from tools.document_tool import extract_document
+        from tools.database_tool import db_execute, db_mongo_find, db_query, list_connections
+
+        self.register(
+            "discover_tools",
+            discover_tools,
+            "Find tool primitives by query/tag (git, pdf, docker, database). Prefer this over guessing tool names.",
+            {"query": "string", "tags": "string (optional, comma-separated)"},
+            tags=["meta", "discovery"],
+        )
+        self.register(
+            "git_status",
+            GitTool.status,
+            "Read-only git status (structured). cwd must be inside an allowed repo.",
+            {"cwd": "string (optional)"},
+            tags=["git", "readonly"],
+        )
+        self.register(
+            "git_diff",
+            GitTool.diff,
+            "Read-only git diff. Optional staged=true, path, commit.",
+            {"cwd": "string (optional)", "staged": "bool (optional)", "path": "string (optional)", "commit": "string (optional)"},
+            tags=["git", "readonly"],
+        )
+        self.register(
+            "git_log",
+            GitTool.log,
+            "Read-only git log as structured commits.",
+            {"cwd": "string (optional)", "max_count": "integer (optional)", "path": "string (optional)"},
+            tags=["git", "readonly"],
+        )
+        self.register(
+            "git_show",
+            GitTool.show,
+            "Read-only git show for a revision.",
+            {"rev": "string (optional)", "cwd": "string (optional)"},
+            tags=["git", "readonly"],
+        )
+        self.register(
+            "git_branch",
+            GitTool.branch,
+            "List branches (read-only). delete=name is destructive and requires confirmation.",
+            {"cwd": "string (optional)", "all": "bool (optional)", "delete": "string (optional)", "force": "bool (optional)"},
+            tags=["git"],
+        )
+        self.register(
+            "git_remote",
+            GitTool.remote,
+            "List git remotes (read-only).",
+            {"cwd": "string (optional)"},
+            tags=["git", "readonly"],
+        )
+        self.register(
+            "git_checkout",
+            GitTool.checkout,
+            "Switch branch/revision (mutating, confirmed). create=true makes a new branch.",
+            {"target": "string", "cwd": "string (optional)", "create": "bool (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "git_switch",
+            GitTool.switch,
+            "Same as git_checkout — switch or create a branch (confirmed).",
+            {"target": "string", "cwd": "string (optional)", "create": "bool (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "git_add",
+            GitTool.add,
+            "Stage paths inside the bounded repo (confirmed).",
+            {"paths": "string or list", "cwd": "string (optional)", "all": "bool (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "git_commit",
+            GitTool.commit,
+            "Create a commit (confirmed). amend rewrites HEAD and is destructive.",
+            {"message": "string", "cwd": "string (optional)", "amend": "bool (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "git_stash",
+            GitTool.stash,
+            "stash list is read-only; push/pop/apply are confirmed; drop/clear are destructive.",
+            {"action": "string (list|push|pop|apply|drop|clear)", "cwd": "string (optional)", "message": "string (optional)"},
+            tags=["git"],
+        )
+        self.register(
+            "git_fetch",
+            GitTool.fetch,
+            "Fetch from a remote (confirmed, updates refs).",
+            {"cwd": "string (optional)", "remote": "string (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "git_push",
+            GitTool.push,
+            "Push to a remote (always confirmed). force=true is destructive and never silent.",
+            {"cwd": "string (optional)", "remote": "string (optional)", "branch": "string (optional)", "force": "bool (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "git_reset",
+            GitTool.reset,
+            "git reset (confirmed). mode=hard is destructive and never silent.",
+            {"mode": "string (soft|mixed|hard)", "target": "string (optional)", "cwd": "string (optional)"},
+            tags=["git", "mutating"],
+        )
+        self.register(
+            "extract_document",
+            extract_document,
+            "Parse PDF/DOC/DOCX/PPTX/XLSX/CSV with real parsers and return structured text/tables.",
+            {"path": "string", "max_chars": "integer (optional)"},
+            tags=["documents", "pdf", "doc", "docx", "pptx", "xlsx", "csv", "readonly"],
+        )
+        self.register(
+            "docker_ps",
+            DockerTool.ps,
+            "List Docker containers (read-only).",
+            {"all": "bool (optional)"},
+            tags=["docker", "readonly"],
+        )
+        self.register(
+            "docker_images",
+            DockerTool.images,
+            "List Docker images (read-only).",
+            {},
+            tags=["docker", "readonly"],
+        )
+        self.register(
+            "docker_inspect",
+            DockerTool.inspect,
+            "Inspect a Docker container or image (read-only).",
+            {"target": "string"},
+            tags=["docker", "readonly"],
+        )
+        self.register(
+            "docker_logs",
+            DockerTool.logs,
+            "Read recent Docker container logs (read-only).",
+            {"container": "string", "tail": "integer (optional)"},
+            tags=["docker", "readonly"],
+        )
+        self.register(
+            "docker_info",
+            DockerTool.info,
+            "Docker daemon info/status (read-only).",
+            {},
+            tags=["docker", "readonly"],
+        )
+        self.register(
+            "docker_version",
+            DockerTool.version,
+            "Docker client/server version (read-only).",
+            {},
+            tags=["docker", "readonly"],
+        )
+        self.register(
+            "docker_stop",
+            DockerTool.stop,
+            "Stop a container (confirmed).",
+            {"container": "string"},
+            tags=["docker", "mutating"],
+        )
+        self.register(
+            "docker_rm",
+            DockerTool.rm,
+            "Remove a container (destructive, never silent).",
+            {"target": "string", "force": "bool (optional)"},
+            tags=["docker", "destructive"],
+        )
+        self.register(
+            "db_list_connections",
+            list_connections,
+            "List named configured database connections (no secrets, no arbitrary URLs).",
+            {},
+            tags=["database", "readonly"],
+        )
+        self.register(
+            "db_query",
+            db_query,
+            "Read-only SQL (SELECT/WITH) against a named configured SQLite or Postgres connection.",
+            {"connection": "string", "sql": "string", "max_rows": "integer (optional)"},
+            tags=["database", "sqlite", "postgres", "readonly"],
+        )
+        self.register(
+            "db_execute",
+            db_execute,
+            "Write SQL on a connection that allows write (confirmed). DROP/TRUNCATE/ALTER are destructive.",
+            {"connection": "string", "sql": "string"},
+            tags=["database", "mutating"],
+        )
+        self.register(
+            "db_mongo_find",
+            db_mongo_find,
+            "Find documents on a named configured MongoDB connection (read-only).",
+            {
+                "connection": "string",
+                "collection": "string",
+                "filter_json": "string (optional)",
+                "database": "string (optional)",
+                "limit": "integer (optional)",
+            },
+            tags=["database", "mongo", "readonly"],
+        )
+
     @classmethod
     def reset_instance(cls) -> None:
         cls._instance = None
+
+
+def discover_tools(query: str = "", tags: str = "") -> dict:
+    registry = ToolRegistry()
+    registry.setup()
+    tag_list = [t.strip() for t in str(tags or "").split(",") if t.strip()]
+    matches = registry.discover(query or "", tags=tag_list or None)
+    return {
+        "status": "success",
+        "query": query,
+        "tags": tag_list,
+        "tools": matches,
+        "count": len(matches),
+    }
 
 
 def setup_registry() -> ToolRegistry:

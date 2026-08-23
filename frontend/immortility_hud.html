@@ -212,20 +212,43 @@
       border: 1px solid var(--line); background: #12141a; color: var(--text); cursor: pointer;
     }
     .confirm-bar button.yes { border-color: var(--ok); color: var(--ok); }
-    .composer { display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; align-items: end; }
+    .composer { display: grid; grid-template-columns: auto auto auto 1fr auto; gap: 8px; align-items: end; }
     .composer textarea {
       resize: none; min-height: 44px; max-height: 90px; padding: 10px;
       background: #08090b; border: 1px solid var(--line); color: var(--text);
       font-family: var(--font-body); font-size: 14px;
     }
     .composer textarea:focus { outline: 1px solid var(--red); }
-    .mic-btn, .stop-btn, #sendBtn {
+    .mic-btn, .stop-btn, .attach-btn, #sendBtn {
       width: 44px; height: 44px; border: 1px solid var(--line);
       background: #0c0e12; color: var(--text); cursor: pointer;
       display: grid; place-items: center;
     }
-    .mic-btn svg, .stop-btn svg { width: 18px; height: 18px; fill: none; stroke: var(--red); stroke-width: 1.8; }
+    .mic-btn svg, .stop-btn svg, .attach-btn svg { width: 18px; height: 18px; fill: none; stroke: var(--red); stroke-width: 1.8; }
+    .attach-file {
+      position: absolute; width: 0.1px; height: 0.1px; opacity: 0; overflow: hidden;
+    }
     .mic-btn.is-listening { background: rgba(255,43,43,0.2); border-color: var(--red); }
+    .attach-btn:hover { border-color: var(--red); }
+    .attach-btn:disabled { opacity: 0.45; cursor: default; }
+    .panel.chat.drop-target { outline: 1px dashed var(--red); outline-offset: -4px; }
+    .attach-chips {
+      display: none; flex-wrap: wrap; gap: 6px; margin: 0 0 8px;
+    }
+    .attach-chips.show { display: flex; }
+    .attach-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      max-width: 100%; padding: 4px 8px;
+      border: 1px solid rgba(255,43,43,0.45); background: rgba(255,43,43,0.08);
+      font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em;
+      color: var(--text);
+    }
+    .attach-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .attach-chip button {
+      border: none; background: transparent; color: var(--muted);
+      cursor: pointer; font-size: 12px; line-height: 1; padding: 0;
+    }
+    .attach-chip button:hover { color: var(--red-hot); }
     .stop-btn { color: var(--red-hot); }
     .stop-btn:hover { border-color: var(--red); }
     #sendBtn {
@@ -449,6 +472,7 @@
             <button type="button" class="yes" id="confirmYes">YES</button>
             <button type="button" id="confirmNo">NO</button>
           </div>
+          <div class="attach-chips" id="attachChips"></div>
           <form class="composer" id="composer">
             <button type="button" class="mic-btn" id="micBtn" title="Voice — start conversation" aria-label="Voice">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -462,7 +486,15 @@
                 <rect x="6" y="6" width="12" height="12" fill="currentColor" stroke="none"/>
               </svg>
             </button>
-            <textarea id="input" rows="2" placeholder="Ask Immortility…" autocomplete="off"></textarea>
+            <button type="button" class="attach-btn" id="attachBtn" title="Attach a local PDF, DOC, DOCX, PPTX, XLSX, CSV, or TXT (up to 20 MB)" aria-label="Attach files">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14"/>
+                <path d="M5 12h14"/>
+              </svg>
+            </button>
+            <input type="file" id="filePick" class="attach-file" multiple
+              accept=".pdf,.doc,.docx,.pptx,.xlsx,.csv,.txt,.md">
+            <textarea id="input" rows="2" placeholder="Ask Immortility… or attach a document" autocomplete="off"></textarea>
             <button type="submit" id="sendBtn">SEND</button>
           </form>
         </div>
@@ -513,6 +545,9 @@
     const stopBtn = document.getElementById("stopBtn");
     const typing = document.getElementById("typing");
     const composer = document.getElementById("composer");
+    const attachBtn = document.getElementById("attachBtn");
+    const filePick = document.getElementById("filePick");
+    const attachChips = document.getElementById("attachChips");
     const confirmBar = document.getElementById("confirmBar");
     const confirmText = document.getElementById("confirmText");
     const confirmYes = document.getElementById("confirmYes");
@@ -531,6 +566,7 @@
     let voiceAbort = null;
     let chatAbort = null;
     let awaitingConfirm = false;
+    let pendingAttachments = [];
     let seenDueFired = new Set();
     let calMonth = new Date();
 
@@ -918,17 +954,121 @@
       }
     }
 
+    function renderAttachChips() {
+      attachChips.innerHTML = "";
+      if (!pendingAttachments.length) {
+        attachChips.classList.remove("show");
+        return;
+      }
+      attachChips.classList.add("show");
+      pendingAttachments.forEach((file, idx) => {
+        const chip = document.createElement("div");
+        chip.className = "attach-chip";
+        const label = document.createElement("span");
+        const extra = file.truncated ? " · clipped" : "";
+        label.textContent = (file.name || "file") + extra;
+        label.title = file.name || "";
+        const rm = document.createElement("button");
+        rm.type = "button";
+        rm.setAttribute("aria-label", "Remove " + (file.name || "file"));
+        rm.textContent = "×";
+        rm.addEventListener("click", () => {
+          pendingAttachments.splice(idx, 1);
+          renderAttachChips();
+        });
+        chip.appendChild(label);
+        chip.appendChild(rm);
+        attachChips.appendChild(chip);
+      });
+    }
+
+    async function uploadPickedFiles(list) {
+      const files = Array.from(list || []).filter(Boolean);
+      if (!files.length) return;
+      if (pendingAttachments.length + files.length > 4) {
+        showToast("Attach at most 4 files.");
+        return;
+      }
+      const fd = new FormData();
+      files.forEach((f) => fd.append("files", f, f.name));
+      attachBtn.disabled = true;
+      typing.textContent = "PARSING DOCUMENT…";
+      typing.classList.add("show");
+      try {
+        const res = await fetch("/hud/upload", {
+          method: "POST",
+          headers: { "X-Immortility-Token": window.HUD_TOKEN || "" },
+          body: fd,
+        });
+        const raw = await res.text();
+        let data = {};
+        try { data = JSON.parse(raw); } catch (_) {
+          showToast(res.status === 413 ? "File too large." : "Upload failed. Try a local PDF or DOCX.");
+          return;
+        }
+        (data.files || []).forEach((item) => {
+          if (item && item.id) pendingAttachments.push(item);
+        });
+        (data.errors || []).forEach((err) => showToast(err));
+        if (!data.ok && !(data.files || []).length) {
+          showToast(data.error || "Upload failed.");
+        }
+        renderAttachChips();
+      } catch (_) {
+        showToast("Upload failed — is Immortility running?");
+      } finally {
+        attachBtn.disabled = false;
+        typing.classList.remove("show");
+        filePick.value = "";
+      }
+    }
+
+    async function pickLocalFiles() {
+      if (window.showOpenFilePicker) {
+        try {
+          const handles = await window.showOpenFilePicker({
+            multiple: true,
+            excludeAcceptAllOption: false,
+            types: [{
+              description: "Documents",
+              accept: {
+                "application/pdf": [".pdf"],
+                "application/msword": [".doc"],
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+                "text/csv": [".csv"],
+                "text/plain": [".txt", ".md"],
+              },
+            }],
+          });
+          const files = [];
+          for (const handle of handles) files.push(await handle.getFile());
+          await uploadPickedFiles(files);
+          return;
+        } catch (err) {
+          if (err && err.name === "AbortError") return;
+        }
+      }
+      filePick.click();
+    }
+
     async function sendMessage(text, { fromVoice = false, session = null, signal = null } = {}) {
       const msg = (text || "").trim();
-      if (!msg) return;
+      const attachIds = pendingAttachments.map((a) => a.id).filter(Boolean);
+      const attachNames = pendingAttachments.map((a) => a.name).filter(Boolean);
+      if (!msg && !attachIds.length) return;
       if (fromVoice && session != null && session !== voiceSession) return;
       if (!fromVoice && busy) return;
       if (!fromVoice) busy = true;
       sendBtn.disabled = true;
       if (!voiceConvo) micBtn.disabled = true;
       if (!fromVoice) {
-        addBubble("user", msg);
+        const shown = msg || ("Attached: " + attachNames.join(", "));
+        addBubble("user", shown);
         input.value = "";
+        pendingAttachments = [];
+        renderAttachChips();
         if (chatAbort) {
           try { chatAbort.abort(); } catch (_) {}
         }
@@ -936,8 +1076,8 @@
         signal = chatAbort.signal;
       }
       typing.textContent = fromVoice
-        ? "LISTENING DONE — THINKING…"
-        : "WORKING IN TERMINAL…";
+        ? "LISTENING DONE — STREAMING…"
+        : "STREAMING…";
       typing.classList.add("show");
       setFaceMode("thinking");
       backendHint.textContent = "BACKEND // TERMINAL";
@@ -947,9 +1087,11 @@
           headers: hudHeaders(),
           body: JSON.stringify({
             message: msg,
+            attachments: attachIds,
             speak: true,
             wait_tts: !!fromVoice,
             from_voice: !!fromVoice,
+            stream: true,
           }),
           signal: signal || undefined,
         });
@@ -1175,6 +1317,24 @@
         sendMessage(input.value);
       }
     });
+    attachBtn.addEventListener("click", () => pickLocalFiles());
+    filePick.addEventListener("change", () => uploadPickedFiles(filePick.files));
+    const chatPanel = document.querySelector("section.panel.chat");
+    if (chatPanel) {
+      ["dragenter", "dragover"].forEach((ev) => {
+        chatPanel.addEventListener(ev, (e) => {
+          e.preventDefault();
+          chatPanel.classList.add("drop-target");
+        });
+      });
+      ["dragleave", "drop"].forEach((ev) => {
+        chatPanel.addEventListener(ev, () => chatPanel.classList.remove("drop-target"));
+      });
+      chatPanel.addEventListener("drop", (e) => {
+        e.preventDefault();
+        uploadPickedFiles(e.dataTransfer && e.dataTransfer.files);
+      });
+    }
     micBtn.addEventListener("click", () => startVoice());
     stopBtn.addEventListener("click", () => hardStop());
     confirmYes.addEventListener("click", () => decideConfirm("yes"));
@@ -1187,6 +1347,10 @@
           headers: hudHeaders(),
         });
         const data = await res.json();
+        if (typeof data.status === "string" && data.status.startsWith("STREAM ")) {
+          typing.textContent = data.status.slice(7) || "STREAMING…";
+          typing.classList.add("show");
+        }
         if (data.sync) document.getElementById("syncLabel").textContent = data.sync;
         if (data.face && !listening && !awaitingConfirm) setFaceMode(data.face);
         if (typeof data.rag_chunks === "number") {

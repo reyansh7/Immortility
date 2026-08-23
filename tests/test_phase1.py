@@ -39,7 +39,7 @@ def reset_singletons(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_1_chat_greeting():
     """User: hi → normal chat response."""
-    with patch("core.action_engine.chat") as mock_chat:
+    with patch("core.action_engine.chat") as mock_chat, patch("core.llm.chat", mock_chat):
         mock_chat.return_value = {"message": {"content": "Hello! How can I help you today?"}}
 
         with patch("core.router.chat") as mock_route:

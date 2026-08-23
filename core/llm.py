@@ -810,6 +810,161 @@ def _fast_system_prompt() -> str:
     )
 
 
+def assemble_stream_chunks(chunks: list[str]) -> str:
+    """Join streamed token pieces. Unit-tested without a live server."""
+    return "".join(chunks)
+
+
+def _stream_ollama_native(
+    messages: list[dict[str, Any]],
+    *,
+    role: str = "brain",
+    max_output_tokens: int | None = None,
+    temperature: float = 0.4,
+    on_token: Any = None,
+) -> str:
+    import json
+    import urllib.error
+    import urllib.request
+
+    tag = local_model(None, provider="ollama", role=role)
+    root = _ollama_api_root()
+    url = f"{root}/api/chat"
+    options: dict[str, Any] = {"temperature": float(temperature)}
+    if max_output_tokens is not None and int(max_output_tokens) > 0:
+        options["num_predict"] = int(max_output_tokens)
+    num_ctx = _configured_context()
+    if num_ctx > 0:
+        options["num_ctx"] = num_ctx
+    try:
+        from core.config import get_config
+
+        think_flag = bool(get_config().ollama_think)
+        http_timeout = float(get_config().openai_timeout_seconds)
+    except Exception:
+        think_flag = False
+        http_timeout = 120.0
+    payload = {
+        "model": tag,
+        "messages": _normalize_openai_messages(messages),
+        "stream": True,
+        "think": think_flag,
+        "options": options,
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    pieces: list[str] = []
+    with urllib.request.urlopen(req, timeout=http_timeout) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                body = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = body.get("message") or {}
+            piece = str(msg.get("content") or "")
+            if piece:
+                pieces.append(piece)
+                if on_token:
+                    on_token(piece)
+            if body.get("done"):
+                break
+    return assemble_stream_chunks(pieces)
+
+
+def stream_chat(
+    messages: list[dict[str, Any]],
+    *,
+    role: str = "brain",
+    on_token: Any = None,
+    max_output_tokens: int | None = None,
+    temperature: float = 0.35,
+    **kwargs: Any,
+) -> str:
+    """Stream tokens when the backend allows it; otherwise one-shot chat.
+
+    ``on_token`` is called with each incremental string. Always returns the
+    full assembled reply. JSON tool turns should keep using ``chat()``.
+    """
+    del kwargs
+    t0 = time.perf_counter()
+    first = True
+
+    def _wrap(piece: str) -> None:
+        nonlocal first
+        if first:
+            first = False
+            _record_hud_latency(t0)
+        if on_token:
+            on_token(piece)
+
+    try:
+        provider = _provider().lower()
+        if provider in {"local", "vllm"}:
+            provider = "vllm"
+        if provider == "ollama":
+            _prepare_role(role, None)
+            text = _stream_ollama_native(
+                messages,
+                role=role,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                on_token=_wrap,
+            )
+            if text.strip():
+                return polish_reply(text)
+        elif provider not in {"gemini", "google"}:
+            _prepare_role(role, None)
+            p = provider
+            base = local_base_url(p)
+            api_key = local_api_key(p)
+            tag = local_model(None, provider=p, role=role)
+            client = _openai_client(base, api_key)
+            stream = client.chat.completions.create(
+                model=tag,
+                messages=_normalize_openai_messages(messages),
+                temperature=temperature,
+                max_tokens=max_output_tokens,
+                stream=True,
+            )
+            pieces: list[str] = []
+            for event in stream:
+                choice = (event.choices or [None])[0]
+                if choice is None:
+                    continue
+                delta = getattr(choice, "delta", None)
+                piece = ""
+                if delta is not None:
+                    piece = str(getattr(delta, "content", None) or "")
+                if piece:
+                    pieces.append(piece)
+                    _wrap(piece)
+            text = assemble_stream_chunks(pieces)
+            if text.strip():
+                return polish_reply(text)
+    except Exception as exc:
+        logger.debug("stream_chat fell back to chat(): %s", exc)
+
+    result = chat(
+        model="auto",
+        messages=messages,
+        think=False,
+        max_output_tokens=max_output_tokens,
+        temperature=temperature,
+        role=role,
+    )
+    text = polish_reply(str((result.get("message") or {}).get("content") or ""))
+    if text and on_token:
+        on_token(text)
+    return text
+
+
 def fast_chat(
     user_message: str,
     *,
@@ -817,6 +972,7 @@ def fast_chat(
     system: str | None = None,
     max_output_tokens: int | None = None,
     extra_context: str = "",
+    on_token: Any = None,
 ) -> str:
     """Low-latency conversational reply (HUD chat + talk mode)."""
     if max_output_tokens is None:
@@ -845,6 +1001,18 @@ def fast_chat(
             }
         )
     messages.append({"role": "user", "content": user_message})
+    if on_token is not None:
+        reply = stream_chat(
+            messages,
+            role="brain",
+            on_token=on_token,
+            max_output_tokens=max_output_tokens,
+            temperature=0.35,
+        )
+        return reply or (
+            "I got an empty reply from the local model. "
+            "Try again — thinking/reasoning mode may need to be disabled for this backend."
+        )
     result = chat(
         model="auto",
         messages=messages,

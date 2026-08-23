@@ -44,9 +44,11 @@ HEAVY_CHAT_HINTS: tuple[str, ...] = (
     "deploy",
     "test suite",
     "leetcode",
-    "analyze",
-    "scan",
-    "index",
+    "find those changes",
+    "find out those changes",
+    "what changed",
+    "git status",
+    "git diff",
 )
 
 STOP_PHRASES: frozenset[str] = frozenset({

@@ -3,6 +3,8 @@ import re
 
 from core.llm import chat
 
+from core.execution_mode import classify_strategy as classify_execution_strategy
+
 VALID_CATEGORIES = ("RESEARCH_TASK", "ACTION", "TASK", "CHAT", "PROJECT")
 
 
@@ -79,3 +81,8 @@ Category:"""
             return valid
 
     return "CHAT"
+
+
+def classify_strategy(user_input: str, *, category: str | None = None) -> str:
+    """FAST | AGENT | BACKGROUND — execution strategy, not a capability bucket."""
+    return classify_execution_strategy(user_input, category=category)

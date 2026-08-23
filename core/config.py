@@ -18,6 +18,10 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_int_clamped(name: str, default: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, _env_int(name, default)))
+
+
 def _env_float(name: str, default: float) -> float:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -40,12 +44,17 @@ class ImmortilityConfig:
     """Runtime knobs — override via environment variables."""
 
     # Chat / tokens
+    # FAST stays short (greetings). chat_max_tokens is the long-reply budget
+    # (HUD AGENT, CLI chat, reports). 4096 is the 8GB VRAM ceiling.
     fast_chat_max_tokens: int = 220
+    chat_max_tokens: int = 2048
     speech_max_tokens: int = 200
     cli_fast_chat_max_tokens: int = 280
-    cli_chat_max_tokens: int = 320
-    action_summary_max_tokens: int = 700
+    cli_chat_max_tokens: int = 2048
+    action_summary_max_tokens: int = 2048
     fast_chat_char_limit: int = 140
+    cmd_timeout_seconds: float = 60.0
+    cmd_max_output_chars: int = 200_000
 
     # History / memory
     max_history: int = 30
@@ -91,13 +100,19 @@ class ImmortilityConfig:
         except Exception:
             pass
 
+        chat_tokens = _env_int_clamped("IMMORTILITY_CHAT_TOKENS", 2048, 256, 4096)
         cfg = cls(
-            fast_chat_max_tokens=_env_int("IMMORTILITY_FAST_CHAT_TOKENS", 220),
-            speech_max_tokens=_env_int("IMMORTILITY_SPEECH_TOKENS", 200),
-            cli_fast_chat_max_tokens=_env_int("IMMORTILITY_CLI_FAST_TOKENS", 280),
-            cli_chat_max_tokens=_env_int("IMMORTILITY_CLI_CHAT_TOKENS", 320),
-            action_summary_max_tokens=_env_int("IMMORTILITY_ACTION_SUMMARY_TOKENS", 700),
+            fast_chat_max_tokens=_env_int_clamped("IMMORTILITY_FAST_CHAT_TOKENS", 220, 64, 512),
+            chat_max_tokens=chat_tokens,
+            speech_max_tokens=_env_int_clamped("IMMORTILITY_SPEECH_TOKENS", 200, 32, 400),
+            cli_fast_chat_max_tokens=_env_int_clamped("IMMORTILITY_CLI_FAST_TOKENS", 280, 64, 512),
+            cli_chat_max_tokens=_env_int_clamped("IMMORTILITY_CLI_CHAT_TOKENS", chat_tokens, 256, 4096),
+            action_summary_max_tokens=_env_int_clamped(
+                "IMMORTILITY_ACTION_SUMMARY_TOKENS", chat_tokens, 256, 4096
+            ),
             fast_chat_char_limit=_env_int("IMMORTILITY_FAST_CHAT_CHARS", 140),
+            cmd_timeout_seconds=_env_float("IMMORTILITY_CMD_TIMEOUT", 60.0),
+            cmd_max_output_chars=_env_int("IMMORTILITY_CMD_MAX_OUTPUT", 200_000),
             max_history=_env_int("IMMORTILITY_MAX_HISTORY", 30),
             max_conversation_entries=_env_int("IMMORTILITY_MAX_CONV_ENTRIES", 200),
             action_max_steps_readonly=_env_int("IMMORTILITY_ACTION_STEPS_RO", 10),

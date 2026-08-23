@@ -101,13 +101,41 @@ def select_for_role(
     capability: str | None = None,
     registry: ModelRegistry | None = None,
     provider: str | None = None,
+    prefer_resident: bool = False,
+    complexity: str = "",
+    modality: str = "text",
 ) -> Selection | None:
-    """Best model for ``role``, or None when nothing can serve it."""
+    """Best model for ``role``, or None when nothing can serve it.
+
+    Dynamic inputs (not a task-name map): required capability, candidate
+    capabilities, VRAM, warm/cold resident weights, optional complexity and
+    modality. ``prefer_resident`` keeps FAST chat on the already-loaded brain.
+    """
+    del complexity  # reserved for later scoring; VRAM + warm state apply now
     reg = registry or get_registry()
     cap = capability or ROLE_CAPABILITY.get(role, CAP_CHAT)
+    if modality == "image":
+        cap = CAP_VISION
     candidates = _candidates(role, cap, reg)
     if not candidates:
         return None
+
+    if prefer_resident:
+        try:
+            from models.manager import get_manager
+
+            resident = get_manager().resident_heavy()
+        except Exception:
+            resident = None
+        if resident is not None and resident.supports(cap):
+            if not _skip_reason(resident, reg, provider):
+                return Selection(
+                    spec=resident,
+                    capability=cap,
+                    reason=f"role={role} capability={cap} (resident/warm)",
+                    degraded=resident.role != role,
+                    skipped=(),
+                )
 
     skipped: list[str] = []
     for spec in candidates:
@@ -115,8 +143,6 @@ def select_for_role(
         if reason:
             skipped.append(f"{spec.id}: {reason}")
             continue
-        # "degraded" means another role is standing in (e.g. the brain doing
-        # code work), not merely that an uninstalled entry sorted ahead.
         degraded = spec.role != role
         why = f"role={role} capability={cap}"
         if degraded:

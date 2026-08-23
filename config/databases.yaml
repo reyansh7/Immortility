@@ -1,0 +1,18 @@
+# Named database connections only. The model cannot pass arbitrary URLs.
+# Example:
+# connections:
+#   notes:
+#     type: sqlite
+#     path: C:/path/to/notes.db
+#     allow: [read]
+#   app:
+#     type: postgres
+#     url: postgresql://user:pass@127.0.0.1:5432/app
+#     allow: [read]
+#   logs:
+#     type: mongo
+#     url: mongodb://127.0.0.1:27017
+#     database: logs
+#     allow: [read]
+
+connections: {}

@@ -47,6 +47,13 @@ def wants_self_inspect(message: str) -> bool:
     low = (message or "").lower().strip()
     if not low:
         return False
+    try:
+        from tools.git_tool import wants_repo_changes
+
+        if wants_repo_changes(low):
+            return False
+    except Exception:
+        pass
     return any(re.search(p, low) for p in _SELF_PATTERNS)
 
 
@@ -175,11 +182,14 @@ def _summarize_with_llm(title: str, evidence: str, user_ask: str) -> str:
         "Write a clear Markdown summary of what you analyzed."
     )
     try:
+        from core.config import get_config
+
+        tokens = get_config().chat_max_tokens
         return fast_chat(
             prompt,
             history=[],
             system=system,
-            max_output_tokens=700,
+            max_output_tokens=tokens,
         ).strip()
     except Exception as exc:
         logger.warning("self-inspect LLM summarize failed: %s", exc)

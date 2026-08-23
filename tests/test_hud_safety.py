@@ -32,6 +32,8 @@ def test_read_and_open_skip_confirmation():
     assert not needs_confirmation("list_directory", {"path": "."})
     assert not needs_confirmation("open_url", {"url": "https://example.com"})
     assert not needs_confirmation("open_application", {"name": "chrome"})
+    assert not needs_confirmation("git_status", {"cwd": "."})
+    assert not needs_confirmation("extract_document", {"path": "a.pdf"})
 
 
 def test_approval_is_exact_only():

@@ -1,7 +1,7 @@
 """Web search — API providers first, DuckDuckGo Playwright as fallback.
 
 Preferred env cascade (WEB_SEARCH_PROVIDER=auto):
-  Tavily → Brave → SearXNG → DuckDuckGo HTML (Playwright)
+  Tavily -> Brave -> SearXNG -> DuckDuckGo HTML (Playwright)
 """
 
 from __future__ import annotations
@@ -15,6 +15,10 @@ import urllib.request
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+SEARCH_UNAVAILABLE = "SEARCH_UNAVAILABLE"
+SEARCH_EXECUTED_ZERO_RESULTS = "SEARCH_EXECUTED_ZERO_RESULTS"
+SEARCH_SUCCESS = "SEARCH_SUCCESS"
 
 
 def _max_results() -> int:
@@ -238,6 +242,7 @@ class SearchTool:
                 if results:
                     return {
                         "status": "success",
+                        "search_state": SEARCH_SUCCESS,
                         "query": q,
                         "provider": name,
                         "results": results,
@@ -247,12 +252,19 @@ class SearchTool:
                 logger.warning("web_search via %s failed: %s", name, exc)
                 errors.append(f"{name}: {exc}")
 
+        ran_but_empty = any("empty results" in e for e in errors)
+        state = SEARCH_EXECUTED_ZERO_RESULTS if ran_but_empty else SEARCH_UNAVAILABLE
         return {
-            "status": "error",
+            "status": "error" if state == SEARCH_UNAVAILABLE else "success",
+            "search_state": state,
             "query": q,
             "provider": provider,
             "results": [],
-            "message": "; ".join(errors) or "search failed",
+            "message": (
+                "search ran and found nothing"
+                if state == SEARCH_EXECUTED_ZERO_RESULTS
+                else ("; ".join(errors) or "search unavailable")
+            ),
         }
 
     @staticmethod
