@@ -2,6 +2,13 @@
 
 Below is a visual flowchart of how data and execution flow through Immortility's core modules, from user input to LLM execution and filesystem edits.
 
+> [!IMPORTANT]
+> Parts of the diagram below are historical. The vector store is **TurboVec**, not
+> ChromaDB, and the chat model is resolved through the model registry
+> (`config/models.yaml`, currently the Qwythos-9B Q4 brain) rather than a hardcoded
+> `qwen3:8b`. See [`IMMORTALITY_AUDIT.md`](IMMORTALITY_AUDIT.md) for the current
+> architecture and [`IMMORTALITY_MODELS.md`](IMMORTALITY_MODELS.md) for the model fleet.
+
 ```mermaid
 flowchart TD
     %% Styling

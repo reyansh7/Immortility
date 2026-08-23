@@ -421,6 +421,13 @@ def wants_browser_action(message: str) -> bool:
     low = _fix_typos((message or "").lower())
     if not low.strip():
         return False
+    try:
+        from tools.link_inspect import wants_link_inspect
+
+        if wants_link_inspect(message):
+            return False
+    except Exception:
+        pass
     if re.search(r"\bopen\s+(it|that|them|this)\s+(in|on|with)\s+(google|chrome)\b", low):
         return True
     if extract_browser_targets(message):
@@ -448,6 +455,12 @@ def handle_browser_request(message: str) -> str | None:
     opened, note = open_urls_in_user_chrome(targets)
     if not opened:
         return "I couldn't open those pages in Chrome."
+    try:
+        from tools.link_inspect import remember_url
+
+        remember_url(opened[0])
+    except Exception:
+        pass
     pretty: list[str] = []
     for u in opened:
         parsed = urllib.parse.urlparse(u)

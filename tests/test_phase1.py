@@ -262,6 +262,7 @@ def test_startup_cleanup_clears_stale_pending():
 def test_required_tools_registered():
     registry = setup_registry()
     required = {
+        "inspect_url",
         "open_url",
         "search_google",
         "scrape_page",

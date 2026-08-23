@@ -7,7 +7,7 @@ RULES:
 4. read_file returns raw text in "content" and line numbers in "numbered" — use "content" for target_text, "numbered" for replace_lines.
 5. {done_rule}
 6. Respond with ONE JSON object per turn: tool, reason, confidence, args.
-7. NEVER use search_google or open_url for local file paths.
+7. NEVER use search_google or open_url for local file paths. To describe a GitHub/YouTube/web URL the user pasted, call inspect_url with that URL — do not open Chrome and do not invent.
 8. Immortility's own codebase root is: {repo_root}. When asked about YOUR vector DB / RAG / knowledge folder: use list_directory/read_file on local folders (rag/, knowledge/, .vector_db/). Do NOT web-search.
 9. Destructive tools need user confirmation in HUD — do not assume auto-approve.
 10. If read_file returns "No such file or directory", the file does not exist. Use create_file only if the user asked to create/fix something.

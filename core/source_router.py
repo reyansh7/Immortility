@@ -72,6 +72,12 @@ _CASUAL = re.compile(
 
 _QUESTION = re.compile(r"\b(what|who|when|where|why|how|is|are|does|did|can)\b", re.I)
 
+_URL = re.compile(r"https?://", re.I)
+_THIS_PAGE = re.compile(
+    r"\b(this|the|that)\s+(website|site|page|link|url|repo|repository|video|github|youtube)\b",
+    re.I,
+)
+
 
 def _context_is_rich(routing_context: str) -> bool:
     ctx = (routing_context or "").strip()
@@ -117,8 +123,18 @@ def _lessons_available(query: str) -> bool:
 
 
 def needs_live_web(query: str) -> bool:
-    """True only for explicit web asks or time-sensitive facts."""
+    """True for explicit web asks, time-sensitive facts, or a URL to inspect."""
     q = query or ""
+    if _URL.search(q):
+        return True
+    if _THIS_PAGE.search(q):
+        try:
+            from tools.link_inspect import get_last_url
+
+            if get_last_url():
+                return True
+        except Exception:
+            pass
     if _WEB_EXPLICIT.search(q):
         return True
     if _WEB_FRESH.search(q):
@@ -150,6 +166,14 @@ def choose_source(
 
     if _CASUAL.search(q) and len(q) < 40:
         return SourceDecision(source="LOCAL", reason="casual greeting", confidence=0.95)
+
+    # A concrete URL (or "this website" after we opened/fetched one) is live web.
+    if _URL.search(q) or (_THIS_PAGE.search(q) and needs_live_web(q)):
+        return SourceDecision(
+            source="WEB",
+            reason="inspect a URL — fetch the page, do not invent",
+            confidence=0.95,
+        )
 
     # Prefer memory when user asks to recall OR we already have strong hits
     if _MEMORY.search(q) or _has_memory_hits(routing_context) or _lessons_available(q):

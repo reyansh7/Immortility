@@ -6,6 +6,7 @@ from tools.browser_agent import run_browser_goal
 from tools.browser_tool import BrowserTool
 from tools.web_search_tool import SearchTool
 from tools.scraper_tool import ScraperTool
+from tools.link_inspect import inspect_url_tool
 from tools.file_tool import FileTool
 from tools.app_tool import AppTool
 from tools.command_tool import CommandTool
@@ -81,6 +82,12 @@ class ToolRegistry:
         self._setup_done = True
 
         self.register("open_url", BrowserTool.open_url, "Navigate browser to a URL", {"url": "string"})
+        self.register(
+            "inspect_url",
+            inspect_url_tool,
+            "Fetch a URL (GitHub repo, YouTube, any webpage) and return real page text. Use this instead of inventing.",
+            {"url": "string"},
+        )
         self.register(
             "search_google",
             SearchTool.search_google,

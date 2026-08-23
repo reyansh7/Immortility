@@ -77,19 +77,36 @@ def _wants_edits(message: str) -> bool:
 
 
 def _wants_face_beautify(message: str) -> bool:
+    """True only for editing the HUD Jarvis face — not resumes mentioning frontend."""
+    from memory.user_profile import wants_remember_about_me
+
     low = (message or "").lower()
     if not low:
         return False
-    faceish = any(w in low for w in ("face", "hud", "frontend", "immortility_hud", "html"))
-    beautify = any(
-        w in low
-        for w in (
-            "beautify", "beautif", "prettier", "human", "less scary",
-            "improve", "redesign", "make changes", "edit the file",
-            "update the face", "change the face", "can you edit",
+    # Bios mention "React frontend" and "improving results" — never steal those.
+    if wants_remember_about_me(message):
+        return False
+    if len(low) > 700 and not re.search(
+        r"\b(immortility_hud|your face|the hud|hud face|jarvis)\b", low
+    ):
+        return False
+    face_target = bool(
+        re.search(
+            r"\b(your face|the face|hud face|jarvis face|immortility_hud|"
+            r"the hud|hud html)\b",
+            low,
         )
     )
-    return faceish and beautify
+    if not face_target:
+        return False
+    return bool(
+        re.search(
+            r"\b(beautify|beautif|prettier|less scary|redesign|"
+            r"humanize|update the face|change the face|"
+            r"improve (the |your )?face)\b",
+            low,
+        )
+    )
 
 
 def apply_human_face_beautify() -> str:
@@ -454,11 +471,41 @@ def handle_hud_request(
         logger.exception("HUD knowledge/index failed")
         return f"Indexing failed: {exc}"
 
+    # URL inspect — fetch GitHub/YouTube/web content. Do NOT open Chrome and invent.
+    try:
+        from tools.link_inspect import handle_link_inspect, wants_link_inspect
+
+        if wants_link_inspect(message):
+            from rich.console import Console
+
+            Console().print(
+                f"[bold cyan][HUD → Link inspect][/bold cyan] {message[:140]}"
+            )
+            reply = handle_link_inspect(message)
+            if reply:
+                return (multi_prefix + reply).strip() if multi_prefix else reply
+    except Exception as exc:
+        logger.exception("HUD link inspect failed")
+        return f"I couldn't read that link: {exc}"
+
+    # "this is about me, remember this" — store bio, never steal into HUD face edits
+    try:
+        from memory.user_profile import handle_remember_about_me
+
+        remembered = handle_remember_about_me(message)
+        if remembered:
+            try:
+                from rich.console import Console
+
+                Console().print("[bold cyan][HUD → Profile][/bold cyan] saved about_me")
+            except Exception:
+                pass
+            return (multi_prefix + remembered).strip() if multi_prefix else remembered
+    except Exception as exc:
+        logger.debug("remember about me failed: %s", exc)
+
     # Face / HUD beautify — deterministic edit (local 8B fails on 1000-line HTML)
-    if _wants_face_beautify(message) or (
-        _wants_edits(message)
-        and any(w in message.lower() for w in ("face", "hud", "immortility_hud", "frontend"))
-    ):
+    if _wants_face_beautify(message):
         try:
             from rich.console import Console
 
@@ -809,6 +856,8 @@ def handle_hud_request(
         "Backend actions run in the Immortility terminal. "
         "You CAN read local files and index Desktop projects into TurboVec via the HUD. "
         "You CAN open sites and searches in Reyansh's Chrome (YouTube, Google, Netflix, etc.). "
+        "When he pastes a URL and asks about it, answers must come from fetched page text "
+        "(inspect_url) — never invent a project's purpose. "
         "Never say you cannot open YouTube or the browser — the HUD does that for real. "
         "When he names a Desktop project (e.g. 'stocks app' = stocks_app), treat it as "
         "THAT codebase — summarize from retrieved local context, never invent a generic app. "
@@ -830,6 +879,18 @@ def handle_hud_request(
         system += f"\n\n{project_note}"
     if memory_bits:
         system += f"\n\nMemory pack:\n{memory_bits[:1600]}"
+    try:
+        from memory.user_profile import get_about_me
+
+        about = get_about_me()
+        if about:
+            system += (
+                "\n\nReyansh's saved profile (use when he asks about himself, "
+                "his resume, EY internship, Immortility, Mirage, or skills):\n"
+                f"{about[:2500]}"
+            )
+    except Exception:
+        pass
     if rag_bits and not thread_note:
         system += f"\n\nRetrieved local code context:\n{rag_bits[:3500]}"
     elif mentioned:

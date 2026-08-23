@@ -66,6 +66,7 @@ Useful commands inside the session:
 | `/import-docs <name> <path>` | Import documentation into a separate collection |
 | `/clear` | Clear conversation / pending state |
 | `/hud` | Re-open the red Immortility JARVIS-style HUD in your browser |
+| `/doctor` | Model fleet preflight: GPU/VRAM, config, per-model health, routing |
 | `/talk` or `/voice` | Continuous speech-to-speech (Whisper → local LLM → male Windows TTS). Say “stop” to leave. |
 | `/listen` | One-shot mic input into the normal text loop |
 | `/exit` | Quit |
@@ -114,15 +115,22 @@ Honest limit: an 8B model cannot hold every line of a large multi-folder project
 CLI/HUD → Knowledge Orchestrator (TurboVec hybrid + graph)
        → Intent Router
            → Chat / Project / Action / Workflow / Coding
+Model layer (config/models.yaml) → role → runtime
 LLM  ←── OpenAI-compatible HTTP (vLLM in WSL2 / Ollama / custom)
 ```
 
 Action Engine `DONE` path runs a verification gate (syntax / build / tests + semantic review) before reporting success.
 
+Models are chosen per **role** (`brain`, `code`, `vision`, `embed`, `asr`, `tts`) by the
+model layer in `models/`, which is VRAM-aware and keeps one heavy model resident at a
+time. See [`IMMORTALITY_MODELS.md`](IMMORTALITY_MODELS.md); the full architecture audit
+and roadmap are in [`IMMORTALITY_AUDIT.md`](IMMORTALITY_AUDIT.md).
+
 ## Tests
 
 ```powershell
 .\venv\Scripts\python.exe -m pytest tests/ -q --ignore=tests/audit_report.py
+.\venv\Scripts\python.exe -m models.doctor
 ```
 
 ## Config
@@ -135,6 +143,8 @@ Action Engine `DONE` path runs a verification gate (syntax / build / tests + sem
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` | Any other OpenAI-compatible server |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Optional Gemini path |
 | `IMMORTILITY_FALLBACK_MODEL` | Secondary model on the same local base URL |
+| `OLLAMA_CODE_MODEL` / `OLLAMA_VISION_MODEL` | Optional coding / vision specialists (unset = brain handles code, vision unavailable) |
+| `IMMORTILITY_NUM_CTX` | Chat context window (8192 default, 16384 tested max on 8 GB) |
 | `RERANK_ENABLED` | `1` to enable CrossEncoder rerank (CPU, default off) |
 | `WHISPER_MODEL` | `small.en` (default) is far more accurate than `base`/`tiny` |
 | `WHISPER_DEVICE` | `cpu` (default) or `cuda`. GPU is probed at startup and falls back to CPU if unusable |

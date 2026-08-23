@@ -1,12 +1,9 @@
-"""System vitals sampler for Immortility HUD (psutil + nvidia-smi)."""
+"""System vitals sampler for Immortility HUD (psutil + shared GPU probe)."""
 
 from __future__ import annotations
 
 import logging
-import shutil
-import subprocess
 import threading
-import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -41,34 +38,23 @@ def get_cached_stats() -> dict[str, Any]:
 
 
 def _sample_nvidia() -> tuple[float | None, float | None, float | None]:
-    """Return (gpu_percent, vram_used_gb, vram_total_gb) via nvidia-smi."""
-    if not shutil.which("nvidia-smi"):
-        return None, None, None
+    """Return (gpu_percent, vram_used_gb, vram_total_gb) from the shared probe.
+
+    Same reading the model manager admits models against, so the HUD gauge and
+    routing decisions can never disagree.
+    """
     try:
-        # Same counters Task Manager GPU tab approximates via NVAPI; nvidia-smi
-        # utilization.gpu is the vendor util % shown in Performance > GPU.
-        proc = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-        line = (proc.stdout or "").strip().splitlines()[0]
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 3:
-            return None, None, None
-        gpu = float(parts[0])
-        used_mb = float(parts[1])
-        total_mb = float(parts[2])
-        return gpu, used_mb / 1024.0, total_mb / 1024.0
+        from models.vram import probe_gpu
+
+        snapshot = probe_gpu(max_age_s=0.0)
     except Exception as exc:
-        logger.debug("nvidia-smi failed: %s", exc)
+        logger.debug("GPU probe unavailable: %s", exc)
         return None, None, None
+    if not snapshot.available:
+        return None, None, None
+    used = None if snapshot.vram_used_mb is None else snapshot.vram_used_mb / 1024.0
+    total = None if snapshot.vram_total_mb is None else snapshot.vram_total_mb / 1024.0
+    return snapshot.gpu_percent, used, total
 
 
 def _sample_once() -> None:

@@ -399,6 +399,9 @@ async def execute_action(
     primary_model = "auto"
     current_model = primary_model
     using_local_fallback = False
+    # Coding edits prefer a specialist when one is installed; otherwise the
+    # router degrades to the brain. Analysis stays on the brain.
+    llm_role = "code" if require_edits else "brain"
     # When Gemini is primary, fall back to the configured local OpenAI-compatible model
     if _provider() == "gemini":
         fallback_model = local_model()
@@ -492,6 +495,7 @@ async def execute_action(
                 messages=messages,
                 think=False,
                 force_provider="local" if using_local_fallback else None,
+                role=llm_role,
             )
         except Exception as exc:
             msg = f"LLM error: {exc}. Backend={active_backend()}"

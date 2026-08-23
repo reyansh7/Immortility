@@ -53,6 +53,8 @@ READ_ONLY_TOOLS = frozenset({
     "validate_patch",
     "get_system_status",
     "list_top_processes",
+    "web_search",
+    "inspect_url",
     "DONE",
 })
 

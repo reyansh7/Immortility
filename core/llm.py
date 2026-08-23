@@ -7,6 +7,10 @@ Local inference goes through any OpenAI-compatible HTTP endpoint
 (vLLM in WSL2 by default, Ollama /v1, or a custom base URL). Backend
 is selected by env only — no code changes to swap models/servers.
 
+Which model serves a request comes from the model layer (``config/models.yaml``
+via ``models.router``), with environment variables as the operator override.
+Roles: "brain" (reasoning, default), "code", "vision".
+
 Env:
   IMMORTILITY_LLM_PROVIDER — vllm | ollama | openai | openai_compat | gemini | auto
   VLLM_BASE_URL / VLLM_MODEL — default http://127.0.0.1:8000/v1 , Qwen/Qwen3-8B
@@ -14,6 +18,8 @@ Env:
   OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL — generic OpenAI-compatible
   GEMINI_API_KEY / GEMINI_MODEL — optional cloud path
   IMMORTILITY_FALLBACK_MODEL — secondary model on the same local base URL
+  OLLAMA_CODE_MODEL / OLLAMA_VISION_MODEL — optional role specialists
+  IMMORTILITY_NUM_CTX — explicit context window (8192 default, 16384 tested max)
 """
 
 from __future__ import annotations
@@ -153,34 +159,75 @@ def _is_placeholder_model(name: str | None) -> bool:
     return low in {"auto", "none", ""} or "gemini" in low
 
 
-def local_model(explicit: str | None = None, *, provider: str | None = None) -> str:
-    """Resolve the chat model id for the active OpenAI-compatible backend."""
+def _env_model_for_provider(provider: str) -> str:
+    """Chat model id from environment for one provider ("" when unset).
+
+    Environment is the operator override and always outranks the registry.
+    """
+    if provider == "ollama":
+        return (
+            os.environ.get("OLLAMA_MODEL")
+            or os.environ.get("VLLM_MODEL")
+            or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
+            or ""
+        ).strip()
+    if provider == "openai":
+        return (
+            os.environ.get("OPENAI_MODEL")
+            or os.environ.get("VLLM_MODEL")
+            or os.environ.get("OLLAMA_MODEL")
+            or ""
+        ).strip()
+    return (
+        os.environ.get("VLLM_MODEL")
+        or os.environ.get("OLLAMA_MODEL")
+        or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
+        or ""
+    ).strip()
+
+
+def _registry_model_for_role(role: str, provider: str) -> str:
+    """Model id for a registry role, or "" when the model layer can't serve it."""
+    try:
+        from models.router import model_id_for_role
+
+        return model_id_for_role(role, provider=provider)
+    except Exception as exc:
+        logger.debug("Model registry unavailable for role %s: %s", role, exc)
+        return ""
+
+
+def local_model(
+    explicit: str | None = None,
+    *,
+    provider: str | None = None,
+    role: str = "brain",
+) -> str:
+    """Resolve the chat model id for the active OpenAI-compatible backend.
+
+    Resolution order: explicit argument, a role specialist from the model
+    registry (for non-brain roles), environment, the registry's default for the
+    active provider, then the built-in default.
+    """
     _load_dotenv()
     p = (provider or _local_provider_name()).lower()
     if explicit and not _is_placeholder_model(explicit):
         return explicit.strip()
 
-    if p == "ollama":
-        return (
-            os.environ.get("OLLAMA_MODEL")
-            or os.environ.get("VLLM_MODEL")
-            or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
-            or DEFAULT_OLLAMA_MODEL
-        ).strip()
-    if p == "openai":
-        return (
-            os.environ.get("OPENAI_MODEL")
-            or os.environ.get("VLLM_MODEL")
-            or os.environ.get("OLLAMA_MODEL")
-            or DEFAULT_VLLM_MODEL
-        ).strip()
-    # vllm / local
-    return (
-        os.environ.get("VLLM_MODEL")
-        or os.environ.get("OLLAMA_MODEL")
-        or os.environ.get("IMMORTILITY_FALLBACK_MODEL")
-        or DEFAULT_VLLM_MODEL
-    ).strip()
+    if role and role != "brain":
+        specialist = _registry_model_for_role(role, p)
+        if specialist:
+            return specialist
+
+    from_env = _env_model_for_provider(p)
+    if from_env:
+        return from_env
+
+    from_registry = _registry_model_for_role("brain", p)
+    if from_registry:
+        return from_registry
+
+    return DEFAULT_OLLAMA_MODEL if p == "ollama" else DEFAULT_VLLM_MODEL
 
 
 # Back-compat alias used by action_engine / older imports
@@ -189,11 +236,41 @@ def _ollama_model(explicit: str | None = None) -> str:
 
 
 def _fallback_model(primary: str) -> str | None:
+    """Secondary chat model: env override first, then the registry's next choice."""
     _load_dotenv()
     alt = (os.environ.get("IMMORTILITY_FALLBACK_MODEL") or "").strip()
     if alt and alt != primary:
         return alt
+    try:
+        from models.router import fallback_model_id
+
+        candidate = fallback_model_id(primary=primary, provider=_local_provider_name())
+    except Exception as exc:
+        logger.debug("Registry fallback lookup failed: %s", exc)
+        return None
+    if candidate and candidate != primary:
+        return candidate
     return None
+
+
+def role_model(role: str) -> str:
+    """Model id a role would use right now ("" when unavailable).
+
+    Thin public wrapper so callers never import the model layer directly.
+    """
+    _load_dotenv()
+    return _registry_model_for_role(role, _local_provider_name())
+
+
+def capability_available(capability: str) -> bool:
+    """True when some configured model can serve ``capability`` (e.g. "vision")."""
+    try:
+        from models.router import capability_available as _available
+
+        return _available(capability, provider=_local_provider_name())
+    except Exception as exc:
+        logger.debug("Capability probe failed for %s: %s", capability, exc)
+        return False
 
 
 def local_base_url(provider: str | None = None) -> str:
@@ -360,10 +437,30 @@ def _ollama_api_root(openai_v1_url: str | None = None) -> str:
     return base.rstrip("/")
 
 
+def _configured_context() -> int:
+    """Explicit context override, or 0 when the model's own default should stand.
+
+    Only set when the operator asked for it: sending ``num_ctx`` on every call
+    would force Ollama to reload the model whenever it differs.
+    """
+    _load_dotenv()
+    if not (os.environ.get("IMMORTILITY_NUM_CTX") or "").strip():
+        return 0
+    try:
+        from models.router import select_for_role
+
+        selection = select_for_role("brain")
+    except Exception as exc:
+        logger.debug("Context lookup failed: %s", exc)
+        return 0
+    return selection.spec.context if selection else 0
+
+
 def _chat_ollama_native(
     messages: list[dict[str, Any]],
     model: str | None = None,
     *,
+    role: str = "brain",
     max_output_tokens: int | None = None,
     temperature: float = 0.4,
 ) -> dict[str, Any]:
@@ -372,7 +469,7 @@ def _chat_ollama_native(
     import urllib.error
     import urllib.request
 
-    tag = local_model(model, provider="ollama")
+    tag = local_model(model, provider="ollama", role=role)
     root = _ollama_api_root()
     url = f"{root}/api/chat"
     options: dict[str, Any] = {
@@ -380,6 +477,9 @@ def _chat_ollama_native(
     }
     if max_output_tokens is not None and int(max_output_tokens) > 0:
         options["num_predict"] = int(max_output_tokens)
+    num_ctx = _configured_context()
+    if num_ctx > 0:
+        options["num_ctx"] = num_ctx
 
     try:
         from core.config import get_config
@@ -454,11 +554,30 @@ def _message_text_from_openai_choice(choice: Any) -> str:
     return ""
 
 
+def _prepare_role(role: str, explicit_model: str | None) -> None:
+    """Let the model manager make VRAM room before a role's first call.
+
+    Skipped when the caller pinned a model id explicitly — that path bypasses
+    role routing, so there is nothing for the manager to decide.
+    """
+    if explicit_model and not _is_placeholder_model(explicit_model):
+        return
+    try:
+        from models.manager import get_manager
+
+        result = get_manager().ensure_loaded(role)
+        if result.evicted:
+            logger.info("Model switch: %s", result.message)
+    except Exception as exc:
+        logger.debug("Model manager unavailable (%s) — continuing", exc)
+
+
 def _chat_openai_compat(
     messages: list[dict[str, Any]],
     model: str | None = None,
     *,
     provider: str | None = None,
+    role: str = "brain",
     json_mode: bool = False,
     max_output_tokens: int | None = None,
     temperature: float = 0.4,
@@ -468,6 +587,7 @@ def _chat_openai_compat(
     p = (provider or _local_provider_name()).lower()
     if p in {"local", "vllm"}:
         p = "vllm"
+    _prepare_role(role, model)
 
     # Qwen3 via Ollama OpenAI-compat often fills `reasoning` and leaves
     # `content` empty — use native /api/chat with think=false instead.
@@ -475,13 +595,14 @@ def _chat_openai_compat(
         return _chat_ollama_native(
             messages,
             model=model,
+            role=role,
             max_output_tokens=max_output_tokens,
             temperature=float(temperature) if temperature is not None else 0.4,
         )
 
     base = local_base_url(p)
     api_key = local_api_key(p)
-    tag = local_model(model, provider=p)
+    tag = local_model(model, provider=p, role=role)
     client = _openai_client(base, api_key)
 
     kwargs = dict(kwargs)
@@ -564,7 +685,12 @@ def chat(
     force_provider: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Provider-agnostic chat. Gemini when configured; else OpenAI-compatible local."""
+    """Provider-agnostic chat. Gemini when configured; else OpenAI-compatible local.
+
+    ``role`` selects a registry role ("brain" reasoning by default, "code" for a
+    coding specialist when one is installed). Unknown or unavailable roles fall
+    back to the brain rather than failing.
+    """
     del think  # unused — kept for call-site compatibility
     t0 = time.perf_counter()
     messages = messages or []
@@ -572,6 +698,7 @@ def chat(
     json_mode = fmt == "json"
     max_output_tokens = kwargs.pop("max_output_tokens", None)
     temperature = kwargs.pop("temperature", 0.4)
+    role = str(kwargs.pop("role", None) or "brain")
     provider = (force_provider or _provider()).lower()
 
     if provider in {"local"}:
@@ -630,6 +757,7 @@ def chat(
                     messages,
                     model=None,
                     provider=_local_provider_name(),
+                    role=role,
                     json_mode=bool(json_mode),
                     max_output_tokens=max_output_tokens,
                     temperature=temperature,
@@ -648,6 +776,7 @@ def chat(
             messages,
             model=explicit,
             provider=local_p,
+            role=role,
             json_mode=bool(json_mode),
             max_output_tokens=max_output_tokens,
             temperature=temperature,

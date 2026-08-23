@@ -38,7 +38,70 @@ class ResearchAgent:
         if "leetcode" in query.lower():
             return await self._research_leetcode(query)
 
+        from tools.link_inspect import extract_urls, get_last_url, inspect_url, wants_link_inspect
+
+        urls = extract_urls(query)
+        if not urls and wants_link_inspect(query):
+            last = get_last_url()
+            if last:
+                urls = [last]
+        if urls:
+            return await self._research_urls(query, urls)
+
         return await self._research_generic(query)
+
+    async def _research_urls(self, query: str, urls: list[str]) -> ResearchContext:
+        """Fetch the pasted URL(s) first. Never invent from model memory."""
+        from agents.research_synth import ResearchSource, synthesize_with_citations
+        from tools.link_inspect import inspect_url
+
+        sources: list[ResearchSource] = []
+        texts: list[str] = []
+        kept: list[str] = []
+        for url in urls[:3]:
+            console.print(f"[cyan]Inspecting URL:[/cyan] {url}")
+            page = inspect_url(url)
+            text = str(page.get("text") or "").strip()
+            title = str(page.get("title") or url)
+            if page.get("ok") and text:
+                sources.append(
+                    ResearchSource(title=title, url=url, snippet=text[:400], text=text)
+                )
+                texts.append(f"## {title}\nURL: {url}\n{text[:6000]}")
+                kept.append(url)
+            else:
+                console.print(
+                    f"[yellow]Fetch failed:[/yellow] {page.get('error') or 'empty'}"
+                )
+
+        llm_answer = ""
+        if texts:
+            try:
+                from core.llm import fast_chat
+
+                bundle = "\n\n".join(texts)[:12000]
+                llm_answer = fast_chat(
+                    query,
+                    extra_context=(
+                        "Answer ONLY from this fetched page content. "
+                        "Do not invent. Cite the URL.\n\n"
+                        f"{bundle}"
+                    ),
+                    max_output_tokens=520,
+                )
+            except Exception:
+                llm_answer = ""
+
+        synth = synthesize_with_citations(query, sources, llm_answer=llm_answer)
+        ctx = ResearchContext(
+            query=query,
+            urls=kept or urls[:3],
+            sources=kept or urls[:3],
+            extracted_text="\n\n".join(texts)[:10000] or synth.answer,
+            summary=synth.answer,
+        )
+        self.state.set_research_context(ctx)
+        return ctx
 
     async def _run_tool(self, tool: str, args: dict | None = None) -> dict:
         raw = await self.registry.execute(tool, args or {})

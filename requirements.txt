@@ -21,6 +21,8 @@ prompt-toolkit>=3.0.0
 # LLM providers
 google-genai>=1.0.0
 python-dotenv>=1.0.0
+# Model fleet config (config/models.yaml)
+PyYAML>=6.0
 
 # Offline voice (free — no cloud APIs)
 faster-whisper>=1.0.0

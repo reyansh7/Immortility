@@ -33,6 +33,7 @@ class UserProfile:
             "preferred_language": "",
             "preferred_framework": "",
             "common_projects": [],
+            "about_me": "",
         }
         self._load()
 
@@ -84,6 +85,62 @@ class UserProfile:
         )
         if m:
             self.name = m.group(1)
+
+    @property
+    def about_me(self) -> str:
+        return str(self._data.get("about_me") or "").strip()
+
+    def remember_about_me(self, text: str) -> str:
+        """Store a resume / bio the user asked Immortility to remember."""
+        from datetime import datetime, timezone
+
+        body = re.sub(
+            r"(?i)\b(this is about me|remember this|remember me|save this)\b[:,.\s]*",
+            " ",
+            text or "",
+        )
+        body = re.sub(r"\s+", " ", body).strip()
+        if len(body) > 12000:
+            body = body[:12000].rsplit(" ", 1)[0] + "…"
+        if len(body) < 40:
+            return "That was too short to save as a profile. Paste your bio or resume with 'remember this'."
+        self._data["about_me"] = body
+        self._data["about_me_updated"] = datetime.now(timezone.utc).isoformat()
+        self.save()
+        return (
+            f"Saved, {self.name}. I'll remember this as your profile "
+            f"({len(body)} characters). Ask me about yourself anytime."
+        )
+
+
+_REMEMBER_ME = re.compile(
+    r"\b("
+    r"this is about me|remember this|remember me|save this|"
+    r"my (resume|bio|background|cv|profile)|"
+    r"about me"
+    r")\b",
+    re.I,
+)
+
+
+def wants_remember_about_me(message: str) -> bool:
+    """True for 'this is about me, remember this' plus a real bio — not 'remember this file'."""
+    text = (message or "").strip()
+    if len(text) < 80:
+        return False
+    if re.search(r"remember this (file|folder|project|code|path)\b", text, re.I):
+        return False
+    return bool(_REMEMBER_ME.search(text))
+
+
+def handle_remember_about_me(message: str) -> str | None:
+    if not wants_remember_about_me(message):
+        return None
+    return UserProfile().remember_about_me(message)
+
+
+def get_about_me() -> str:
+    return UserProfile().about_me
 
 
 def get_user_name() -> str:

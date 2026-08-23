@@ -1000,7 +1000,7 @@ async def main():
     _voice_enabled = False
 
     completer = WordCompleter(
-        ['/auto', '/talk', '/voice', '/listen', '/hud', '/clear', '/open', '/memory', '/import-docs', '/projects', '/exit'],
+        ['/auto', '/talk', '/voice', '/listen', '/hud', '/doctor', '/clear', '/open', '/memory', '/import-docs', '/projects', '/exit'],
         ignore_case=True,
     )
     session = PromptSession(completer=completer)
@@ -1081,9 +1081,14 @@ async def main():
 
             # Learn user name from casual introductions
             try:
-                from memory.user_profile import UserProfile
+                from memory.user_profile import UserProfile, handle_remember_about_me
 
                 UserProfile().maybe_learn_from_text(user_stripped)
+                remembered = handle_remember_about_me(user_stripped)
+                if remembered:
+                    console.print(Panel(remembered, title="Profile", border_style="cyan"))
+                    await speak_reply(remembered)
+                    continue
             except Exception:
                 pass
 
@@ -1154,6 +1159,17 @@ async def main():
                         console.print(f"[red]Error: {exc}[/red]")
                 else:
                     console.print("[yellow]Usage: /open <project-path>[/yellow]")
+                continue
+
+            if user_lower in ("/doctor", "/models"):
+                try:
+                    from models.doctor import report
+
+                    text, code = await asyncio.to_thread(report)
+                    border = "green" if code == 0 else "red"
+                    console.print(Panel(Text(text), title="Immortility Doctor", border_style=border))
+                except Exception as exc:
+                    console.print(f"[red]Doctor failed: {exc}[/red]")
                 continue
 
             if user_lower == "/memory":

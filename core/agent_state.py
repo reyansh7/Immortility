@@ -49,6 +49,7 @@ class AgentState:
         self.browser_state = None
         self.pending_coding_request: dict | str | None = None
         self.chat_focus: dict | None = None
+        self.last_url: str = ""
 
         path = self.state_path
         # Migrate legacy cwd-relative state.json once
@@ -75,6 +76,7 @@ class AgentState:
                 self.browser_state = data.get("browser_state")
                 self.pending_coding_request = data.get("pending_coding_request")
                 self.chat_focus = data.get("chat_focus")
+                self.last_url = str(data.get("last_url") or "").strip()
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -131,6 +133,7 @@ class AgentState:
                 "browser_state": self.browser_state,
                 "pending_coding_request": self.pending_coding_request,
                 "chat_focus": self.chat_focus,
+                "last_url": self.last_url,
             }
             path = self.state_path
             tmp = path.with_suffix(".tmp")
@@ -149,6 +152,7 @@ class AgentState:
             "browser_state": self.browser_state,
             "pending_coding_request": self.pending_coding_request,
             "chat_focus": self.chat_focus,
+            "last_url": getattr(self, "last_url", "") or "",
         }
         path = self.state_path
         tmp = path.with_suffix(".tmp")

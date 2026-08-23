@@ -1,0 +1,151 @@
+# Immortility model fleet — capability registry.
+#
+# Nothing here downloads weights. A spec whose model_id resolves empty is
+# reported as "unconfigured" and is skipped by the router.
+#
+# Hardware budget: RTX 4060, 8 GB VRAM. Only ONE heavy model stays resident;
+# selecting a different heavy role evicts the current one.
+
+version: 1
+
+defaults:
+  # Total VRAM the fleet may assume. Overridden by the real nvidia-smi reading
+  # when a GPU is present; used as the budget when no GPU is detected.
+  total_vram_mb: 8188
+  # Weights above this size count as "heavy" (one at a time).
+  heavy_threshold_mb: 3000
+  # Default chat context. IMMORTILITY_NUM_CTX can raise this (16384 is the
+  # tested ceiling on 8 GB; 32k+ is expected to OOM with KV cache).
+  context: 8192
+
+models:
+  # ── Reasoning brain (orchestration, planning, tool selection) ──────────
+  # A spec is only selected when its runtime matches the active provider, so
+  # the Ollama tag below is never handed to a vLLM endpoint.
+  - id: brain
+    role: brain
+    runtime: ollama
+    model_id: qwythos9b-q4
+    env_model_var: auto          # OLLAMA_MODEL
+    capabilities: [chat, reasoning, planning, tools, code]
+    priority: 10
+    vram_mb: 6200
+    heavy: true
+    notes: Qwythos-9B Q4_K_M. Do not use the advertised 1M context on 8 GB.
+
+  - id: brain-vllm
+    role: brain
+    runtime: openai_compat
+    model_id: Qwen/Qwen3-8B
+    env_model_var: auto          # VLLM_MODEL / OPENAI_MODEL
+    capabilities: [chat, reasoning, planning, tools, code]
+    priority: 20
+    vram_mb: 6000
+    heavy: true
+    optional: true
+    notes: WSL2 vLLM path — see scripts/wsl/README.md.
+
+  - id: brain-fallback
+    role: brain
+    runtime: auto                # whichever provider is active
+    model_id: ""                 # set IMMORTILITY_FALLBACK_MODEL (e.g. qwen3:8b)
+    env_model_var: IMMORTILITY_FALLBACK_MODEL
+    capabilities: [chat, reasoning, planning, tools, code]
+    priority: 90
+    vram_mb: 5600
+    heavy: true
+    optional: true
+    notes: Secondary model on the same endpoint. Used when the brain errors.
+
+  # ── Coding specialist (optional; brain handles code when absent) ───────
+  - id: coder
+    role: code
+    runtime: auto
+    model_id: ""                 # set OLLAMA_CODE_MODEL to enable
+    env_model_var: OLLAMA_CODE_MODEL
+    capabilities: [chat, code, tools]
+    priority: 5
+    vram_mb: 5200
+    heavy: true
+    optional: true
+    notes: >
+      Small/medium quantized coder that fits beside nothing else, e.g.
+      qwen2.5-coder:7b-instruct-q4_K_M or a 14B Q4. Unset by default.
+
+  - id: coder-large
+    role: code
+    runtime: auto
+    model_id: ""                 # set IMMORTILITY_CODE_LARGE_MODEL to enable
+    env_model_var: IMMORTILITY_CODE_LARGE_MODEL
+    capabilities: [chat, code, tools]
+    priority: 1
+    vram_mb: 19000
+    min_free_vram_mb: 19000      # gated far above 8 GB — never auto-selected here
+    heavy: true
+    optional: true
+    notes: >
+      Qwen3-Coder-30B-A3B class. Registered for machines that can host it;
+      the VRAM gate keeps it unselected on an 8 GB laptop unless forced.
+
+  # ── Vision / multimodal (optional; no silent text-only substitute) ─────
+  - id: vision
+    role: vision
+    runtime: auto
+    model_id: ""                 # set OLLAMA_VISION_MODEL to enable
+    env_model_var: OLLAMA_VISION_MODEL
+    capabilities: [vision, chat]
+    priority: 10
+    vram_mb: 6800
+    heavy: true
+    optional: true
+    notes: >
+      Qwen3-VL-8B class quant. Loading it evicts the brain. When unset the
+      vision capability reports unavailable instead of guessing from text.
+
+  # ── Retrieval embeddings (CPU-friendly, always available) ──────────────
+  - id: embed
+    role: embed
+    runtime: sentence_transformers
+    model_id: BAAI/bge-small-en-v1.5
+    env_model_var: IMMORTILITY_EMBED_MODEL
+    capabilities: [embed]
+    priority: 10
+    dimension: 384
+    vram_mb: 140
+    device: cpu
+    notes: >
+      Changing this invalidates every TurboVec vector — a full reindex.
+      BGE-M3 (1024-d) is a later phase, not a drop-in swap.
+
+  # ── Reranker (CPU, disabled by default to keep VRAM free) ──────────────
+  - id: rerank
+    role: rerank
+    runtime: sentence_transformers
+    model_id: BAAI/bge-reranker-base
+    env_model_var: RERANK_MODEL
+    enabled_env: RERANK_ENABLED
+    capabilities: [rerank]
+    priority: 10
+    vram_mb: 0
+    device: cpu
+
+  # ── Speech in (CPU by default — CUDA competes with the brain) ──────────
+  - id: asr
+    role: asr
+    runtime: faster_whisper
+    model_id: small.en
+    env_model_var: WHISPER_MODEL
+    capabilities: [asr]
+    priority: 10
+    vram_mb: 0
+    device: cpu
+
+  # ── Speech out (offline Windows SAPI) ─────────────────────────────────
+  - id: tts
+    role: tts
+    runtime: sapi
+    model_id: sapi5
+    capabilities: [tts]
+    priority: 10
+    vram_mb: 0
+    device: cpu
