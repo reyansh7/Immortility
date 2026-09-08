@@ -13,6 +13,7 @@ _hud_state: dict[str, Any] = {
     "sync": "SYNCED",
     "face": "idle",
     "ollama_latency_ms": None,
+    "permission_mode": "assisted",
 }
 
 

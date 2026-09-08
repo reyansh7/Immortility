@@ -77,6 +77,9 @@ class ImmortilityConfig:
     outcome_learning: bool = True
     critic_enabled: bool = True
 
+    # Phase 4 permission mode: safe | assisted | autonomous | developer
+    permission_mode: str = "assisted"
+
     # Web search
     web_search_provider: str = "auto"
     web_search_max_results: int = 5
@@ -124,6 +127,9 @@ class ImmortilityConfig:
             log_backup_count=_env_int("IMMORTILITY_LOG_BACKUPS", 3),
             outcome_learning=_env_bool("IMMORTILITY_OUTCOME_LEARNING", True),
             critic_enabled=_env_bool("IMMORTILITY_CRITIC", True),
+            permission_mode=(
+                os.environ.get("IMMORTILITY_PERMISSION_MODE") or "assisted"
+            ).strip().lower(),
             web_search_provider=(
                 os.environ.get("WEB_SEARCH_PROVIDER") or "auto"
             ).strip().lower(),

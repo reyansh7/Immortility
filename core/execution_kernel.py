@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from core.event_bus import EventBus
 from core.harness import MODE_FAST, TraceEvent, begin_turn, current_scope, new_id, record
-from core.pending_action import needs_confirmation
+from core.permissions import DENY, decide
 
 logger = logging.getLogger(__name__)
 
@@ -212,9 +212,10 @@ class ExecutionKernel:
         args = args or {}
         if self.cancelled():
             return KernelResult(False, error="cancelled", cancelled=True)
-        if needs_confirmation(name, args):
-            # Kernel never auto-approves; caller/Action Engine owns the gate.
-            pass
+        gate = decide(name, args)
+        if gate.action == DENY:
+            record(TraceEvent(kind="tool", tool=name, error=f"denied:{gate.mode}"))
+            return KernelResult(False, error=f"denied ({gate.mode}): {gate.reason}")
         if use_cache and name in _READ_ONLY_CACHEABLE:
             from core.tool_cache import get as cache_get
 

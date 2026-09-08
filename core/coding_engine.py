@@ -546,6 +546,18 @@ async def run_coding_loop(
             review_verdict=last_review.verdict if last_review else "",
         )
 
+    try:
+        from core.permissions import MODE_SAFE, get_mode
+
+        if get_mode() == MODE_SAFE:
+            return _finish(
+                STATUS_BLOCKED,
+                "Blocked in SAFE mode: coding edits are denied — /mode assisted to continue.",
+                ROLE_PLANNER,
+            )
+    except Exception:
+        pass
+
     if _kernel_cancelled():
         return _finish(STATUS_CANCELLED, "Cancelled before plan.", ROLE_PLANNER)
 

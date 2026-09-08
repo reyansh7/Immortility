@@ -271,6 +271,14 @@ def capability_report() -> str:
         lines.append("")
     except Exception:
         pass
+    try:
+        from core.permissions import get_mode, mode_description
+
+        mode = get_mode()
+        lines.append(f"Permission mode: {mode} — {mode_description(mode)}")
+        lines.append("")
+    except Exception:
+        pass
     for cap in list_capabilities():
         flag = "yes" if cap.available else "no"
         extra = f" — {cap.detail}" if cap.detail else ""

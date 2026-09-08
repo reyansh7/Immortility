@@ -85,3 +85,9 @@ def events_log_path() -> Path:
 
 def hud_todos_path() -> Path:
     return memory_data_dir() / "hud_todos.json"
+
+
+def handoff_path() -> Path:
+    path = _ROOT / ".immortility"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "handoff.txt"

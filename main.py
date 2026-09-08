@@ -150,7 +150,7 @@ def parse_import_docs_args(text: str) -> tuple[str, str] | None:
 _KNOWN_SLASH = frozenset({
     "/auto", "/talk", "/voice", "/listen", "/hud", "/doctor", "/models",
     "/capabilities", "/caps", "/clear", "/open", "/memory", "/import-docs",
-    "/projects", "/exit", "/quit",
+    "/projects", "/exit", "/quit", "/mode", "/resume", "/handoff",
 })
 
 
@@ -165,7 +165,7 @@ def unknown_slash_command(text: str) -> str | None:
     return (
         f"Unknown command: {first}\n"
         "Try /open <path>, /import-docs <name> <path>, /memory, /projects, "
-        "/doctor, /capabilities, /hud, /talk, /clear, /exit"
+        "/doctor, /capabilities, /mode, /resume, /handoff, /hud, /talk, /clear, /exit"
     )
 
 
@@ -1063,7 +1063,7 @@ async def main():
     _voice_enabled = False
 
     completer = WordCompleter(
-        ['/auto', '/talk', '/voice', '/listen', '/hud', '/doctor', '/capabilities', '/clear', '/open', '/memory', '/import-docs', '/projects', '/exit'],
+        ['/auto', '/talk', '/voice', '/listen', '/hud', '/doctor', '/capabilities', '/clear', '/open', '/memory', '/import-docs', '/projects', '/mode', '/resume', '/handoff', '/exit'],
         ignore_case=True,
     )
     session = PromptSession(completer=completer)
@@ -1242,6 +1242,19 @@ async def main():
                     console.print(Panel(Text(capability_report()), title="Capabilities", border_style="cyan"))
                 except Exception as exc:
                     console.print(f"[red]Capabilities failed: {exc}[/red]")
+                continue
+
+            if user_lower == "/mode" or user_lower.startswith("/mode ") or user_lower in ("/resume", "/handoff"):
+                try:
+                    from core.control_plane import handle_control_command
+
+                    reply = handle_control_command(user_stripped)
+                    if reply:
+                        console.print(Panel(Text(reply), title="Control", border_style="cyan"))
+                    else:
+                        console.print("[yellow]Usage: /mode [safe|assisted|autonomous|developer][/yellow]")
+                except Exception as exc:
+                    console.print(f"[red]Control command failed: {exc}[/red]")
                 continue
 
             if user_lower == "/memory":

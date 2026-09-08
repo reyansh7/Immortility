@@ -15,9 +15,9 @@ from core.agent_state import AgentState
 from core.paths import normalize_path_key, sanitize_llm_path
 from core.pending_action import (
     format_confirmation_message,
-    needs_confirmation,
     with_user_confirmation,
 )
+from core.permissions import CONFIRM, DENY, decide, format_denial
 from core.research_context import ResearchContext
 from tools.tool_registry import ToolRegistry
 
@@ -675,7 +675,12 @@ async def execute_action(
                 )
                 continue
 
-            if needs_confirmation(tool_name, args) and not auto_confirm:
+            gate = decide(tool_name, args)
+            if gate.action == DENY:
+                err = format_denial(gate, tool_name)
+                console.print(f"[red]{err}[/red]")
+                return err
+            if gate.action == CONFIRM and not auto_confirm:
                 state.pending_action = {
                     "tool": tool_name,
                     "args": args,

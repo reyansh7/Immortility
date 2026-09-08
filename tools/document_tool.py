@@ -40,7 +40,7 @@ def _clip(text: str, max_chars: int) -> tuple[str, bool]:
 
 def _extract_pdf(path: Path, max_chars: int) -> dict[str, Any]:
     try:
-        import fitz  # PyMuPDF
+        import fitz  # PyMuPDF  # pyright: ignore[reportMissingImports]
     except ImportError:
         return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="PyMuPDF"))
     try:
@@ -100,7 +100,7 @@ def _extract_docx(path: Path, max_chars: int) -> dict[str, Any]:
 
 def _extract_pptx(path: Path, max_chars: int) -> dict[str, Any]:
     try:
-        from pptx import Presentation
+        from pptx import Presentation  # pyright: ignore[reportMissingImports]
     except ImportError:
         return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="python-pptx"))
     pres = Presentation(str(path))
@@ -127,7 +127,7 @@ def _extract_pptx(path: Path, max_chars: int) -> dict[str, Any]:
 
 def _extract_xlsx(path: Path, max_chars: int) -> dict[str, Any]:
     try:
-        from openpyxl import load_workbook
+        from openpyxl import load_workbook  # pyright: ignore[reportMissingModuleSource]
     except ImportError:
         return _fail("PARSER_UNAVAILABLE", _PARSER_MISSING.format(name="openpyxl"))
     wb = load_workbook(str(path), read_only=True, data_only=True)

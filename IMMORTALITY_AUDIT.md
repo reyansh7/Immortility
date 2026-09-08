@@ -114,10 +114,10 @@ flowchart TD
 | Skill registry / loader / matcher | missing — `skills/` holds one hardcoded LeetCode skill |
 | Hook system | missing — `core/event_bus.py` exists but is not an agent lifecycle hook bus |
 | Rules system | missing — prompts are static files in `prompts/` |
-| Permission modes (SAFE/ASSISTED/AUTONOMOUS/DEVELOPER) | missing — confirmations are per-tool only |
+| Permission modes (SAFE/ASSISTED/AUTONOMOUS/DEVELOPER) | shipped in Phase 4 — `core/permissions.py`; default ASSISTED (per-tool confirm). Destructive git is never silent. |
 | Security scanners (AgentShield-style) | missing |
 | Evaluation harness | partial — `tests/audit_report.py` is a phase smoke runner, not a benchmark |
-| Session resume / handoff | partial — `memory/session_memory.py` exists, no `resume_session` workflow |
+| Session resume / handoff | shipped in Phase 4 — `memory/session_resume.py` (`/resume`, `/handoff`). Stale tool confirmations stay cleared on startup. |
 
 ### 3.3 Duplication and drift
 
@@ -235,7 +235,7 @@ immortility1/
 
 See [IMMORTALITY_VISION.md](IMMORTALITY_VISION.md) and [IMMORTALITY_PHASES.md](IMMORTALITY_PHASES.md) for the frozen architecture and honest phase status.
 
-Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are also shipped. Phase 3 is **complete**. ECC was inspiration only (not vendored). Phase 4 was **not** started.
+Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are also shipped. Phase 3 is **complete**. ECC was inspiration only (not vendored). Phase 4 (operational control plane) is **shipped**.
 
 | Phase | Deliverable | State |
 | --- | --- | --- |
@@ -245,8 +245,8 @@ Phase 0 (this document) and Phase 1 are shipped. Slices H, K, 2A, and 2B are als
 | K | Execution kernel, FAST/AGENT/BACKGROUND, streaming, warm/cold | shipped |
 | 2A | Capability card/report, permissions, search states | shipped |
 | 2B | Git / documents / Docker inspect / configured DBs / command hardening | shipped |
-| 3 | Autonomous coding loop over existing kernels | **complete** — `core/coding_engine.py` plus skills/hooks/planner/fresh reviewer/PROJECT adapter. ECC was inspiration only (not vendored). Phase 4 was **not** started. |
-| 4 | Multimodal VL/OCR/video | **not started** — ECC/fresh-review items originally listed here shipped in Phase 3 |
+| 3 | Autonomous coding loop over existing kernels | **complete** — `core/coding_engine.py` plus skills/hooks/planner/fresh reviewer/PROJECT adapter. ECC was inspiration only (not vendored). |
+| 4 | Operational control plane (permission modes + session resume/handoff) | **shipped** — not multimodal; VL/OCR stays Phase 5 |
 | 5 | Multimodal VL/OCR/video | roadmap |
 | 6 | Memory/RAG budgets; BGE-M3 only with full reindex | roadmap |
 | 7 | Full eval harness + novel-task generalization | roadmap |

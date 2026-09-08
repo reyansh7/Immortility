@@ -420,6 +420,16 @@ def handle_hud_request(
         return "Say something and I'll handle it, Reyansh."
 
     try:
+        from core.control_plane import handle_control_command, is_control_command
+
+        if is_control_command(message):
+            reply = handle_control_command(message)
+            if reply:
+                return reply
+    except Exception:
+        pass
+
+    try:
         from memory.outcome_memory import get_outcome_memory, outcome_learning_enabled
 
         if outcome_learning_enabled():

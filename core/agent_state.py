@@ -41,6 +41,7 @@ class AgentState:
 
     def _load(self):
         self.mode = "CHAT"
+        self.permission_mode = "assisted"
         self.pending_action = None
         self.current_task = None
         self.active_project = None
@@ -66,6 +67,7 @@ class AgentState:
                     with path.open("r", encoding="utf-8") as f:
                         data = json.load(f)
                 self.mode = data.get("mode", "CHAT")
+                self.permission_mode = data.get("permission_mode", "assisted")
                 self.pending_action = data.get("pending_action")
                 self.current_task = data.get("current_task")
                 self.active_project = data.get(
@@ -125,6 +127,7 @@ class AgentState:
             # Persist under the same lock acquisition (BUG-9)
             data = {
                 "mode": self.mode,
+                "permission_mode": getattr(self, "permission_mode", "assisted"),
                 "pending_action": self.pending_action,
                 "current_task": self.current_task,
                 "active_project": self.active_project,
@@ -144,6 +147,7 @@ class AgentState:
     def save(self) -> None:
         data = {
             "mode": self.mode,
+            "permission_mode": getattr(self, "permission_mode", "assisted"),
             "pending_action": self.pending_action,
             "current_task": self.current_task,
             "active_project": self.active_project,

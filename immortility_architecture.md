@@ -118,4 +118,4 @@ Planner (heuristic, LLM only when underspecified)
 
 Skills live in `skills/registry.py` + `prompts/rules/*.md`. Hooks live in `core/hooks.py` and cannot bypass cancel. PROJECT `CodingWorkflow` JWT/rename/logging paths stay deterministic; general coding uses this loop. Retry budget is `IMMORTILITY_MAX_RETRIES`. Destructive git is never issued by this loop.
 
-Phase 4 (multimodal VL/OCR/audio/video) is **not** started.
+Phase 4 (permission modes + session resume/handoff) is shipped. Multimodal VL/OCR/audio/video is Phase 5 and is **not** started.

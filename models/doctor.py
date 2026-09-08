@@ -196,6 +196,13 @@ def run_checks() -> tuple[list[Check], int]:
         if web and web.available:
             checks.append(Check("Capability: web_search", OK, web.detail))
         checks.append(Check("Capabilities", INFO, "see /capabilities"))
+        try:
+            from core.permissions import get_mode, mode_description
+
+            mode = get_mode()
+            checks.append(Check("Permission mode", INFO, f"{mode} — {mode_description(mode)}"))
+        except Exception:
+            pass
     except Exception as exc:
         checks.append(Check("Capabilities", WARN, str(exc)))
     try:
