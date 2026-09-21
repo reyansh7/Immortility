@@ -35,6 +35,7 @@ _PROVIDER_MODEL_VARS: dict[str, tuple[str, ...]] = {
     "ollama": ("OLLAMA_MODEL",),
     "vllm": ("VLLM_MODEL", "OPENAI_MODEL"),
     "openai": ("OPENAI_MODEL", "VLLM_MODEL"),
+    "nvidia": ("NVIDIA_MODEL",),
 }
 
 _MAX_SAFE_CONTEXT = 32768
@@ -90,7 +91,7 @@ def _provider_for_runtime(runtime: str) -> str:
         return "ollama"
     if runtime == RUNTIME_OPENAI_COMPAT:
         active = local_provider_name()
-        return active if active in {"vllm", "openai"} else "vllm"
+        return active if active in {"vllm", "openai", "nvidia"} else "vllm"
     return local_provider_name()
 
 
@@ -177,7 +178,7 @@ class ModelRegistry:
         active = (provider or local_provider_name()).lower()
         if spec.runtime == RUNTIME_OLLAMA:
             return active == "ollama"
-        return active in {"vllm", "openai", "openai_compat", "local"}
+        return active in {"vllm", "openai", "nvidia", "openai_compat", "local"}
 
 
 # ── Loading ─────────────────────────────────────────────────────────────

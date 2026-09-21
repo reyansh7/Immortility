@@ -12,7 +12,8 @@ via ``models.router``), with environment variables as the operator override.
 Roles: "brain" (reasoning, default), "code", "vision".
 
 Env:
-  IMMORTILITY_LLM_PROVIDER — vllm | ollama | openai | openai_compat | gemini | auto
+  IMMORTILITY_LLM_PROVIDER — nvidia | vllm | ollama | openai | openai_compat | gemini | auto
+  NVIDIA_API_KEY / NVIDIA_BASE_URL / NVIDIA_MODEL — NVIDIA NIM Kimi K3
   VLLM_BASE_URL / VLLM_MODEL — default http://127.0.0.1:8000/v1 , Qwen/Qwen3-8B
   OLLAMA_BASE_URL / OLLAMA_MODEL — default http://127.0.0.1:11434/v1
   OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL — generic OpenAI-compatible
@@ -57,6 +58,8 @@ DEFAULT_VLLM_BASE = "http://127.0.0.1:8000/v1"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen3-8B"
 DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3:8b"
+DEFAULT_NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_MODEL = "moonshotai/kimi-k3"
 
 
 def _load_dotenv() -> None:
@@ -102,6 +105,8 @@ def _local_provider_name() -> str:
         return "ollama"
     if raw in {"openai", "openai_compat"}:
         return "openai"
+    if raw in {"nvidia", "nim"}:
+        return "nvidia"
     if raw in {"vllm", "local"}:
         return "vllm"
     # auto / gemini-without-key / unknown → prefer vLLM
@@ -119,6 +124,8 @@ def _provider() -> str:
         return "ollama"
     if raw in {"openai", "openai_compat"}:
         return "openai"
+    if raw in {"nvidia", "nim"}:
+        return "nvidia"
     # auto
     return "gemini" if _gemini_api_key() else _local_provider_name()
 
@@ -178,6 +185,8 @@ def _env_model_for_provider(provider: str) -> str:
             or os.environ.get("OLLAMA_MODEL")
             or ""
         ).strip()
+    if provider == "nvidia":
+        return (os.environ.get("NVIDIA_MODEL") or "").strip()
     return (
         os.environ.get("VLLM_MODEL")
         or os.environ.get("OLLAMA_MODEL")
@@ -227,7 +236,11 @@ def local_model(
     if from_registry:
         return from_registry
 
-    return DEFAULT_OLLAMA_MODEL if p == "ollama" else DEFAULT_VLLM_MODEL
+    if p == "ollama":
+        return DEFAULT_OLLAMA_MODEL
+    if p == "nvidia":
+        return DEFAULT_NVIDIA_MODEL
+    return DEFAULT_VLLM_MODEL
 
 
 # Back-compat alias used by action_engine / older imports
@@ -289,6 +302,8 @@ def local_base_url(provider: str | None = None) -> str:
             or os.environ.get("VLLM_BASE_URL")
             or DEFAULT_VLLM_BASE
         ).rstrip("/")
+    if p == "nvidia":
+        return (os.environ.get("NVIDIA_BASE_URL") or DEFAULT_NVIDIA_BASE).rstrip("/")
     return (
         os.environ.get("VLLM_BASE_URL")
         or os.environ.get("OPENAI_BASE_URL")
@@ -301,6 +316,11 @@ def local_api_key(provider: str | None = None) -> str:
     p = (provider or _local_provider_name()).lower()
     if p == "openai":
         return (os.environ.get("OPENAI_API_KEY") or "not-needed").strip()
+    if p == "nvidia":
+        key = (os.environ.get("NVIDIA_API_KEY") or "").strip()
+        if not key:
+            raise RuntimeError("NVIDIA_API_KEY not set")
+        return key
     if p == "ollama":
         return (os.environ.get("OLLAMA_API_KEY") or os.environ.get("OPENAI_API_KEY") or "ollama").strip()
     return (os.environ.get("VLLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or "not-needed").strip()
@@ -422,6 +442,11 @@ def _hint_for_provider(provider: str) -> str:
         )
     if provider == "openai":
         return "Check OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL."
+    if provider == "nvidia":
+        return (
+            "Check NVIDIA_API_KEY and NVIDIA NIM quota for moonshotai/kimi-k3. "
+            "HTTP 429 means the provider rate-limited the request; no result was simulated."
+        )
     return (
         "Is vLLM running in WSL2? "
         "From WSL: `bash scripts/wsl/start_vllm.sh` "

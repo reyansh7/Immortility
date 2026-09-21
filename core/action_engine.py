@@ -306,6 +306,51 @@ async def execute_action(
     auto_confirm=True skips yes/no prompts (CLI convenience only — HUD must stay False).
     skip_confirm_sigs: tool+args already approved and executed this resume (do not re-prompt).
     """
+    # Hermes is the real closed-loop agent/harness. Keep the legacy JSON tool
+    # loop below as a compatibility fallback, never as a parallel executor.
+    try:
+        from core.config import get_config
+        cfg = get_config()
+        # A Hermes API key is mandatory because Hermes intentionally refuses an
+        # unauthenticated execution endpoint. Until the operator has supplied
+        # one, retain the established local action loop for compatibility.
+        if cfg.agent_backend == "hermes" and cfg.hermes_api_key and user_input:
+            from core.hermes_backend import HermesBackend, format_hermes_failure, public_event
+
+            def _on_hermes_event(event: dict) -> None:
+                visible = public_event(event)
+                kind = visible.get("event") or visible.get("type") or "event"
+                tool = visible.get("tool")
+                status = visible.get("status")
+                if tool:
+                    console.print(f"[dim]Hermes {kind}: {tool}[/dim]")
+                elif status:
+                    console.print(f"[dim]Hermes {kind}: {status}[/dim]")
+
+            result = await HermesBackend().run(
+                user_input,
+                context=context_override,
+                require_edits=require_edits,
+                on_event=_on_hermes_event,
+            )
+            _log_event(
+                "HERMES",
+                user_input,
+                retrieved=context_override,
+                verification_passed=result.ok,
+                failure_reason=result.error or result.error_kind,
+            )
+            if result.ok:
+                console.print(
+                    f"[dim]Hermes run {result.run_id or '?'} completed "
+                    f"({len(result.events)} observed events)[/dim]"
+                )
+                return result.output
+            return format_hermes_failure(result)
+    except Exception as exc:
+        logger.exception("Hermes backend integration failure")
+        return f"Hermes integration error: {exc}"
+
     state = AgentState()
     registry = ToolRegistry()
     registry.setup()

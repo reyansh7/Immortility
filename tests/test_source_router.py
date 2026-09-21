@@ -12,14 +12,16 @@ def test_synthesize_fail_closed_without_sources():
     assert "will not invent" in result.answer.lower() or "could not find" in result.answer.lower()
 
 
-def test_source_router_web_when_explicit_or_fresh():
+def test_source_router_web_when_explicit_or_fresh(monkeypatch):
+    monkeypatch.setattr("core.source_router._lessons_available", lambda _q: False)
     assert choose_source("research the latest Next.js release").source == "WEB"
     assert choose_source("look up who won the election today").source == "WEB"
     assert choose_source("what is the latest version of Next.js").source == "WEB"
     assert needs_live_web("current bitcoin price today") is True
 
 
-def test_source_router_local_for_general_and_casual():
+def test_source_router_local_for_general_and_casual(monkeypatch):
+    monkeypatch.setattr("core.source_router._lessons_available", lambda _q: False)
     assert choose_source("hi how are you").source == "LOCAL"
     # General knowledge — do NOT force web
     assert choose_source("what is a binary search tree").source == "LOCAL"
@@ -33,5 +35,6 @@ def test_source_router_memory_and_project():
     assert choose_source("how does auth work here", routing_context=rich).source == "MEMORY"
 
 
-def test_source_router_tools():
+def test_source_router_tools(monkeypatch):
+    monkeypatch.setattr("core.source_router._lessons_available", lambda _q: False)
     assert choose_source("fix the login bug in auth.py").source == "TOOLS"

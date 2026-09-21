@@ -23,12 +23,17 @@ def reset_singletons(tmp_path, monkeypatch):
     """Fresh state and temp desktop for each test."""
     AgentState.reset_instance()
     ToolRegistry.reset_instance()
+    monkeypatch.setenv("IMMORTILITY_AGENT_BACKEND", "legacy")
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    from core.config import reset_config_cache
+    reset_config_cache()
     monkeypatch.chdir(tmp_path)
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "system.txt").write_text("You are Immortility.", encoding="utf-8")
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "memory.txt").write_text("", encoding="utf-8")
     yield
+    reset_config_cache()
     AgentState.reset_instance()
     ToolRegistry.reset_instance()
 
@@ -39,7 +44,7 @@ def reset_singletons(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_1_chat_greeting():
     """User: hi → normal chat response."""
-    with patch("core.action_engine.chat") as mock_chat, patch("core.llm.chat", mock_chat):
+    with patch("core.action_engine._kernel_chat") as mock_chat, patch("core.llm.chat", mock_chat):
         mock_chat.return_value = {"message": {"content": "Hello! How can I help you today?"}}
 
         with patch("core.router.chat") as mock_route:
@@ -196,7 +201,7 @@ async def test_6_leetcode_workflow_pending_confirmation(tmp_path, monkeypatch):
                 "class Solution:\n    def twoSum(self, nums, target):\n        return [0, 1]"
             )
 
-            with patch("core.action_engine.chat") as mock_chat:
+            with patch("core.action_engine._kernel_chat") as mock_chat:
                 mock_chat.return_value = {"message": {"content": "Use a hash map."}}
 
                 from skills.leetcode_skill import LeetCodeSkill

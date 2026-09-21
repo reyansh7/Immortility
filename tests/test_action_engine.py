@@ -14,10 +14,15 @@ from tools.tool_registry import ToolRegistry
 def reset_state(tmp_path, monkeypatch):
     AgentState.reset_instance()
     ToolRegistry.reset_instance()
+    monkeypatch.setenv("IMMORTILITY_AGENT_BACKEND", "legacy")
+    monkeypatch.delenv("HERMES_API_KEY", raising=False)
+    from core.config import reset_config_cache
+    reset_config_cache()
     monkeypatch.chdir(tmp_path)
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "system.txt").write_text("test", encoding="utf-8")
     yield
+    reset_config_cache()
     AgentState.reset_instance()
     ToolRegistry.reset_instance()
 
@@ -73,7 +78,9 @@ async def test_action_engine_stops_after_repeated_failures(tmp_path):
         {"message": {"content": fail_edit}} for _ in range(6)
     ]
 
-    with patch("core.action_engine.chat") as mock_chat:
+    # The legacy loop uses the execution-kernel model boundary; patch that
+    # boundary so this remains a deterministic unit test without a live LLM.
+    with patch("core.action_engine._kernel_chat") as mock_chat:
         mock_chat.side_effect = responses
         # auto_confirm bypasses the mutator confirmation gate so the loop can
         # actually reach the repeated-failure guard under test.

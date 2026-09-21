@@ -69,6 +69,13 @@ class ImmortilityConfig:
     openai_timeout_seconds: float = 120.0
     ollama_think: bool = False
 
+    # Hermes native agent/harness API.  Secrets remain environment-only.
+    agent_backend: str = "hermes"
+    hermes_base_url: str = "http://127.0.0.1:8642"
+    hermes_api_key: str = ""
+    hermes_timeout_seconds: float = 300.0
+    hermes_poll_seconds: float = 0.75
+
     # Logging
     log_max_bytes: int = 5_000_000
     log_backup_count: int = 3
@@ -123,6 +130,11 @@ class ImmortilityConfig:
             decision_max_retries=_env_int("IMMORTILITY_MAX_RETRIES", 3),
             openai_timeout_seconds=_env_float("IMMORTILITY_LLM_TIMEOUT", 120.0),
             ollama_think=_env_bool("IMMORTILITY_OLLAMA_THINK", False),
+            agent_backend=(os.environ.get("IMMORTILITY_AGENT_BACKEND") or "hermes").strip().lower(),
+            hermes_base_url=(os.environ.get("HERMES_BASE_URL") or "http://127.0.0.1:8642").strip(),
+            hermes_api_key=(os.environ.get("HERMES_API_KEY") or os.environ.get("API_SERVER_KEY") or "").strip(),
+            hermes_timeout_seconds=_env_float("HERMES_TIMEOUT_SECONDS", 300.0),
+            hermes_poll_seconds=_env_float("HERMES_POLL_SECONDS", 0.75),
             log_max_bytes=_env_int("IMMORTILITY_LOG_MAX_BYTES", 5_000_000),
             log_backup_count=_env_int("IMMORTILITY_LOG_BACKUPS", 3),
             outcome_learning=_env_bool("IMMORTILITY_OUTCOME_LEARNING", True),

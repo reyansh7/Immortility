@@ -20,18 +20,18 @@ defaults:
 
 models:
   # ── Reasoning brain (orchestration, planning, tool selection) ──────────
-  # A spec is only selected when its runtime matches the active provider, so
-  # the Ollama tag below is never handed to a vLLM endpoint.
+  # Kimi K3 is the primary brain. NVIDIA NIM is OpenAI-compatible and does
+  # not consume local VRAM; environment configuration may override it.
   - id: brain
     role: brain
-    runtime: ollama
-    model_id: qwythos9b-q4
-    env_model_var: auto          # OLLAMA_MODEL
+    runtime: openai_compat
+    model_id: moonshotai/kimi-k3
+    env_model_var: NVIDIA_MODEL
     capabilities: [chat, reasoning, planning, tools, code]
     priority: 10
-    vram_mb: 6200
-    heavy: true
-    notes: Qwythos-9B Q4_K_M. Do not use the advertised 1M context on 8 GB.
+    vram_mb: 0
+    heavy: false
+    notes: NVIDIA NIM cloud brain. Requires NVIDIA_API_KEY; Hermes uses the same model.
 
   - id: brain-vllm
     role: brain
