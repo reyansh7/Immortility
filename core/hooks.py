@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from core.event_bus import EventBus
-from core.harness import MODE_AGENT, TraceEvent, record
+from core.harness.tracing import MODE_AGENT, TraceEvent, record
 
 logger = logging.getLogger(__name__)
 

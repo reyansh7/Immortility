@@ -206,7 +206,7 @@ def run_checks() -> tuple[list[Check], int]:
     except Exception as exc:
         checks.append(Check("Capabilities", WARN, str(exc)))
     try:
-        from core.harness import last_turn_summary
+        from core.harness.tracing import last_turn_summary
 
         checks.append(Check("Last turn", INFO, last_turn_summary()))
     except Exception:

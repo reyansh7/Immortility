@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from core.event_bus import EventBus
-from core.harness import MODE_AGENT, TraceEvent, begin_turn, record
+from core.harness.tracing import MODE_AGENT, TraceEvent, begin_turn, record
 from core.pending_action import is_destructive_invocation, needs_confirmation
 from core.repo_paths import get_repo_root
 

@@ -2,11 +2,6 @@ import inspect
 import json
 from typing import Callable
 
-from tools.browser_agent import run_browser_goal
-from tools.browser_tool import BrowserTool
-from tools.web_search_tool import SearchTool
-from tools.scraper_tool import ScraperTool
-from tools.link_inspect import inspect_url_tool
 from tools.file_tool import FileTool
 from tools.app_tool import AppTool
 from tools.command_tool import CommandTool
@@ -152,6 +147,13 @@ class ToolRegistry:
             return
         self._setup_done = True
 
+        from tools.browser_agent import run_browser_goal
+        from tools.browser_tool import BrowserTool
+        from tools.web_search_tool import SearchTool
+        from tools.scraper_tool import ScraperTool
+        from tools.link_inspect import inspect_url_tool
+        from tools.computer_tool import ComputerTool
+
         self.register("open_url", BrowserTool.open_url, "Navigate browser to a URL", {"url": "string"})
         self.register(
             "inspect_url",
@@ -176,6 +178,16 @@ class ToolRegistry:
         self.register("get_page_text", ScraperTool.get_page_text, "Extract readable text from current page", {})
         self.register("create_file", FileTool.create_file, "Create a NEW file only (fails if exists)", {"path": "string", "content": "string"})
         self.register("read_file", FileTool.read_file, "Read file — content is raw text; numbered has line numbers for replace_lines", {"path": "string"})
+        self.register("read_file_lines", FileTool.read_file_lines, "Read specific line range from any file in the OS", {"path": "string", "start_line": "integer (optional)", "end_line": "integer (optional)"}, tags=["files", "read"])
+        self.register("search_file_content", FileTool.search_file_content, "Search text or regex pattern across any file or directory in the whole OS with line numbers and lines", {"path": "string", "query": "string", "recursive": "bool (optional)", "max_results": "integer (optional)", "is_regex": "bool (optional)"}, tags=["files", "search", "read"])
+        self.register("find_files", FileTool.find_files, "Find files or folders by name or glob pattern inside the filesystem sandbox", {"root_path": "string (optional)", "pattern": "string", "max_results": "integer (optional)"}, tags=["files", "search", "read"])
+        self.register(
+            "scan_storage",
+            FileTool.scan_storage,
+            "Read-only report of the largest files and folders inside the sandbox. Never deletes.",
+            {"path": "string (optional)", "limit": "integer (optional)"},
+            tags=["files", "storage", "read"],
+        )
         self.register("write_file", FileTool.write_file, "Write content to a file", {"path": "string", "content": "string"})
         self.register("list_directory", FileTool.list_directory, "List directory contents", {"path": "string"})
         self.register(
@@ -195,6 +207,19 @@ class ToolRegistry:
         self.register("get_system_status", SystemTool.get_system_status, "Get overall system CPU, memory, and disk usage", {})
         self.register("list_top_processes", SystemTool.list_top_processes, "List top system processes", {"sort_by": "string (memory|cpu)", "limit": "integer"})
         self.register("kill_process", SystemTool.kill_process, "Forcibly terminate a running process by PID", {"pid": "integer"})
+
+        # Computer Use tools (Windows & Desktop control)
+        self.register("computer_list_windows", ComputerTool.get_windows, "List open visible top-level windows", {}, tags=["computer", "desktop", "read"])
+        self.register("computer_get_active_window", ComputerTool.get_active_window, "Get the active window currently in foreground", {}, tags=["computer", "desktop", "read"])
+        self.register("computer_focus_window", ComputerTool.focus_window, "Focus a window by title substring or HWND handle", {"title": "string (optional)", "handle": "integer (optional)"}, tags=["computer", "desktop", "window"])
+        self.register("computer_launch_app", ComputerTool.launch_application, "Launch an application executable or workspace", {"name": "string (optional)", "path": "string (optional)"}, tags=["computer", "desktop", "app"])
+        self.register("computer_close_window", ComputerTool.close_window, "Close an application window", {"title": "string (optional)", "handle": "integer (optional)"}, tags=["computer", "desktop", "window"])
+        self.register("computer_get_accessibility_tree", ComputerTool.get_accessibility_tree, "Extract structured UI automation tree for active or named window", {"window_title": "string (optional)", "max_depth": "integer (optional)"}, tags=["computer", "desktop", "uia", "read"])
+        self.register("computer_click", ComputerTool.click, "Click a UI element by name/role/id or coordinate fallback", {"name": "string (optional)", "role": "string (optional)", "automation_id": "string (optional)", "x": "integer (optional)", "y": "integer (optional)"}, tags=["computer", "desktop", "input"])
+        self.register("computer_type", ComputerTool.type_text, "Type text into target edit element or active focused element", {"text": "string", "clear_first": "bool (optional)", "name": "string (optional)", "automation_id": "string (optional)"}, tags=["computer", "desktop", "input"])
+        self.register("computer_press_key", ComputerTool.press_key, "Press single keyboard key", {"key": "string"}, tags=["computer", "desktop", "input"])
+        self.register("computer_hotkey", ComputerTool.hotkey, "Press combination of keys simultaneously", {"keys": "list[string]"}, tags=["computer", "desktop", "input"])
+        self.register("computer_screenshot", ComputerTool.screenshot, "Capture desktop screenshot", {"path": "string (optional)"}, tags=["computer", "desktop", "screenshot", "read"])
 
         # Extended browser tools
         self.register("get_page_title", BrowserTool.get_page_title, "Get current page title", {})

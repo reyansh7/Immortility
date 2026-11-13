@@ -8,7 +8,7 @@ import time
 import pytest
 
 from core.execution_kernel import ExecutionKernel, get_kernel
-from core.harness import last_turn, record, reset_for_tests, TraceEvent
+from core.harness.tracing import last_turn, record, reset_for_tests, TraceEvent
 from core.llm import assemble_stream_chunks
 from core.tool_cache import clear as clear_tool_cache
 from core.tool_cache import get as cache_get

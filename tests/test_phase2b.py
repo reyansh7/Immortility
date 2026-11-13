@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from core.harness import last_turn, reset_for_tests
+from core.harness.tracing import last_turn, reset_for_tests
 from core.pending_action import (
     is_destructive_invocation,
     needs_confirmation,

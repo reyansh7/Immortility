@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-import threading
+import re
 from logging.handlers import RotatingFileHandler
 
 # pyrefly: ignore [missing-import]
@@ -16,9 +16,7 @@ from prompt_toolkit.formatted_text import HTML
 
 from pathlib import Path
 
-from memory.memory_manager import MemoryManager
 from tools.browser_manager import BrowserManager
-from tools.tool_registry import setup_registry
 from core.agent_state import AgentState
 from core.router import classify_route
 from core.pending_action import is_approval, is_rejection
@@ -85,7 +83,7 @@ def _get_engine():
     return _knowledge_engine
 
 
-from core.intent import HEAVY_CHAT_HINTS, STOP_PHRASES, is_coding_intent, is_heavy_chat
+from core.intent import HEAVY_CHAT_HINTS, STOP_PHRASES, instant_reply, is_coding_intent, is_heavy_chat
 
 
 def _looks_like_fast_chat(text: str) -> bool:
@@ -1005,6 +1003,35 @@ def _launch_immortility_hud() -> None:
         console.print(f"[yellow]HUD launch skipped: {exc}[/yellow]")
 
 
+async def _startup_recovery() -> None:
+    """Check for interrupted tasks and offer to resume them.
+
+    Called once at startup.  Never raises — a failure here must not prevent
+    the main loop from starting.
+    """
+    try:
+        from core.task_manager import get_task_manager
+        tm = get_task_manager()
+        interrupted = tm.startup_recover()
+        if not interrupted:
+            return
+        console.print(f"\n[bold yellow]⚠ {len(interrupted)} interrupted task(s) found:[/bold yellow]")
+        for task in interrupted[:5]:  # cap display at 5
+            console.print(
+                f"  [{task.id[:8]}] {task.status.upper()} | "
+                f"step {task.current_step}/{len(task.plan)} | "
+                f"{task.goal[:60]}"
+            )
+            console.print(f"  [dim]Last updated: {task.updated_at}[/dim]")
+        if len(interrupted) > 5:
+            console.print(f"  [dim]…and {len(interrupted) - 5} more[/dim]")
+        console.print(
+            "[dim]Use /task resume <id> to continue a task, or /task cancel <id> to discard it.[/dim]"
+        )
+    except Exception as exc:
+        console.print(f"[dim]Startup recovery skipped: {exc}[/dim]")
+
+
 async def main():
     global _voice_enabled
     banner = Panel(
@@ -1031,32 +1058,19 @@ async def main():
         _th.Thread(target=warm_llm, name="llm-warm-main", daemon=True).start()
     except Exception:
         pass
-    memory = MemoryManager().get_full_summary() or ""
-    console.print(f"[blue]Memory:[/blue] {memory[:120]}...\n" if memory else "")
-    
-    setup_registry()
+    memory = ""
     state = AgentState()
     state.cleanup_on_startup()
-    console.print("[dim]State loaded.[/dim]")
-
-    # ── Restore active project in background (don't block prompt) ───
+    console.print("[dim]Ready.[/dim]")
     if state.active_project:
-        proj_name = state.active_project
+        console.print(
+            f"[dim]Active project: {state.active_project} "
+            "(index loads when you ask about it)[/dim]"
+        )
 
-        def _bg_restore() -> None:
-            try:
-                engine = _get_engine()
-                restored = engine.restore_project(proj_name)
-                if restored:
-                    console.print(
-                        f"[dim]Restored project: {restored.name} "
-                        f"({restored.total_chunks} chunks)[/dim]"
-                    )
-            except Exception as exc:
-                console.print(f"[dim]Could not restore project: {exc}[/dim]")
-
-        threading.Thread(target=_bg_restore, name="ke-restore", daemon=True).start()
-        console.print(f"[dim]Restoring project '{proj_name}' in background…[/dim]")
+    # ── Startup recovery — show any interrupted tasks ────────────────
+    await _startup_recovery()
+    # ────────────────────────────────────────────────────────────────
     
     auto_mode = False
     voice_mode = False
@@ -1316,6 +1330,15 @@ async def main():
             if await handle_pending_action(user_stripped):
                 continue
 
+            greeting = instant_reply(user_stripped)
+            if greeting:
+                _pending_auto_learn = None
+                state.append_message("user", user_stripped)
+                state.append_message("assistant", greeting)
+                console.print(Panel(greeting, title="🧠 Immortility", border_style="cyan"))
+                await speak_reply(greeting)
+                continue
+
             try:
                 from core.capabilities import answer_capability_question, wants_capability_report
 
@@ -1341,21 +1364,11 @@ async def main():
             except Exception as exc:
                 console.print(f"[red]Git change report failed: {exc}[/red]")
 
-            # Fast path FIRST: desktop/projects scan — no RAG, no Knowledge Engine, no Gemini wait
-            from core.desktop_scanner import spoken_projects_brief, wants_projects_scan
+            from core.execution_mode import MODE_FAST, classify_strategy as classify_exec_strategy
+            from core.harness.tracing import begin_turn
 
-            if wants_projects_scan(user_stripped):
-                console.print("[dim]Live filesystem scan (fast path)…[/dim]")
-                await handle_desktop_projects_request(user_stripped)
-                if _voice_enabled or voice_mode:
-                    await _speak_if_enabled(spoken_projects_brief())
-                continue
-
-            # Fast conversational path: skip RAG/routing for short casual chat
-            if _looks_like_fast_chat(user_stripped):
+            if _looks_like_fast_chat(user_stripped) or classify_exec_strategy(user_stripped) == MODE_FAST:
                 from core.config import get_config
-                from core.harness import begin_turn
-                from core.execution_mode import MODE_FAST
                 from memory.outcome_memory import get_outcome_memory, lessons_for_prompt
 
                 begin_turn(mode=MODE_FAST)
@@ -1387,6 +1400,79 @@ async def main():
                 except Exception:
                     pass
                 continue
+
+            # Live file / line tracing across the whole OS
+            from tools.hud_agent import _try_trace_file_or_lines, _try_find_files_or_content
+
+            line_trace = _try_trace_file_or_lines(user_stripped)
+            if line_trace:
+                console.print("\n[bold blue][LINE TRACE][/bold blue]")
+                console.print(Panel(Markdown(line_trace), title="🧠 File & Line Trace", border_style="cyan"))
+                state.append_message("user", user_stripped)
+                state.append_message("assistant", line_trace)
+                state.save()
+                continue
+
+            file_search = _try_find_files_or_content(user_stripped)
+            if file_search:
+                console.print("\n[bold blue][FILE SEARCH][/bold blue]")
+                console.print(Panel(Markdown(file_search), title="🧠 File Search", border_style="cyan"))
+                state.append_message("user", user_stripped)
+                state.append_message("assistant", file_search)
+                state.save()
+                continue
+
+            from core.desktop_scanner import (
+                format_single_folder_report,
+                resolve_scan_target,
+                spoken_projects_brief,
+                wants_projects_scan,
+                wants_single_folder_scan,
+            )
+
+            single_target = None
+            if wants_single_folder_scan(user_stripped):
+                try:
+                    single_target = resolve_scan_target(user_stripped)
+                except Exception:
+                    single_target = None
+
+            if single_target:
+                console.print(f"[dim]Live scan of {single_target}…[/dim]")
+                report = format_single_folder_report(single_target)
+                console.print("\n[bold blue][FOLDER SCAN][/bold blue]")
+                console.print(Panel(Markdown(report), title=f"🧠 {single_target.name}", border_style="cyan"))
+                state.append_message("user", user_stripped)
+                state.append_message("assistant", report)
+                state.save()
+                if _voice_enabled or voice_mode:
+                    await _speak_if_enabled(f"Scanned {single_target.name}.")
+                continue
+
+            if wants_projects_scan(user_stripped):
+                console.print("[dim]Live filesystem scan (fast path)…[/dim]")
+                await handle_desktop_projects_request(user_stripped)
+                if _voice_enabled or voice_mode:
+                    await _speak_if_enabled(spoken_projects_brief())
+                continue
+
+            # Fast path: project explanation from live README/manifest
+            from core.desktop_scanner import explain_project_from_disk, wants_project_explanation
+
+            if wants_project_explanation(user_stripped):
+                from core.project_resolve import resolve_project_from_query
+
+                cand_proj = resolve_project_from_query(user_stripped)
+                exp = explain_project_from_disk(cand_proj)
+                if exp:
+                    console.print(f"[dim]Live project inspection…[/dim]")
+                    console.print(Panel(Markdown(exp), title="🧠 Project Explanation", border_style="cyan"))
+                    state.append_message("user", user_stripped)
+                    state.append_message("assistant", exp)
+                    state.save()
+                    if _voice_enabled or voice_mode:
+                        await _speak_if_enabled(exp.split("\n\n")[1] if "\n\n" in exp else exp)
+                    continue
 
             await auto_discover_and_open_project(user_stripped)
 
@@ -1423,7 +1509,7 @@ async def main():
                     )
                     route = await classify_route(user_stripped, routing_context=orchestrated_context)
                     from core.router import classify_strategy
-                    from core.harness import begin_turn
+                    from core.harness.tracing import begin_turn
 
                     strategy = classify_strategy(user_stripped, category=route)
                     begin_turn(mode=strategy)
@@ -1583,14 +1669,16 @@ async def main():
                 console.print(f"[red]Error: {exc}[/red]")
                 logging.exception("Main loop error")
         finally:
-            # Auto-learn runs even when a branch `continue`s (Python runs finally first)
-            if _pending_auto_learn:
+            # Learn facts only from real messages. Greetings must not open the index.
+            learn = (_pending_auto_learn or "").strip()
+            _pending_auto_learn = None
+            if len(learn) >= 12 and not learn.startswith("/") and instant_reply(learn) is None:
                 try:
-                    engine = _get_engine()
-                    await engine._memory.auto_learn(_pending_auto_learn)
+                    from memory.memory_manager import MemoryManager
+
+                    await MemoryManager().auto_learn(learn)
                 except Exception:
                     pass
-                _pending_auto_learn = None
 
     # ── Shutdown ────────────────────────────────────────────────────
     console.print("[dim]Cleaning up resources and stopping background tasks...[/dim]")

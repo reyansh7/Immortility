@@ -238,11 +238,14 @@ def _try_open_explicit_folder_path(message: str) -> str | None:
 
 
 def _try_scan_single_folder(message: str) -> str | None:
-    """Deterministic scan for one folder using only live filesystem data."""
+    """Deterministic scan for one folder or path using only live filesystem data."""
     low = (message or "").lower()
-    if not re.search(r"\b(scan|analy[sz]e|inspect|review|tell me about|about)\b", low):
+    from core.desktop_scanner import wants_single_folder_scan
+
+    if not wants_single_folder_scan(message):
         return None
-    if not any(w in low for w in ("folder", "desktop", "project", "number ", "no.", "#")):
+    # Never steal indexing / ingestion intents
+    if re.search(r"\b(index|ingest|reindex|embed)\b", low):
         return None
     try:
         from core.desktop_scanner import format_single_folder_report, resolve_scan_target
@@ -250,9 +253,129 @@ def _try_scan_single_folder(message: str) -> str | None:
         target = resolve_scan_target(message)
         if target is None:
             return None
+        # Track active project and chat focus so follow-ups know the context!
+        try:
+            from core.agent_state import AgentState
+
+            st = AgentState()
+            st.active_project = target.name
+            st.chat_focus = {
+                "title": target.name,
+                "path": str(target),
+                "summary": f"Scanned project {target.name} at {target}",
+                "kind": "scanned_project",
+            }
+            st.save()
+        except Exception:
+            pass
         return format_single_folder_report(target)
     except Exception:
         return None
+
+
+def _try_trace_file_or_lines(message: str) -> str | None:
+    """Live tracing of specific lines or line ranges in any file across the OS."""
+    low = (message or "").lower().strip()
+    if not re.search(r"\b(line|lines|trace|show\s+file|read\s+file|view\s+file)\b", low):
+        return None
+
+    # 1. Range: lines 10 to 20 of <path> / lines 10-20 in <path>
+    m_lines = re.search(
+        r"\b(?:show|read|display|view|get|trace)\s+lines?\s+(\d+)\s*(?:to|-)\s*(\d+)\s+(?:of|in|from)\s+[\"']?([A-Za-z]:\\[^\s\"']+|[^\s\"']+)[\"']?",
+        message,
+        re.I,
+    )
+    if m_lines:
+        start_l = int(m_lines.group(1))
+        end_l = int(m_lines.group(2))
+        raw_p = m_lines.group(3).strip().rstrip(".,;:")
+        from tools.file_tool import FileTool
+
+        res = FileTool.read_file_lines(raw_p, start_l, end_l)
+        if res.get("status") == "success":
+            return f"**File:** `{res['path']}` (Lines {start_l}–{end_l})\n\n```text\n{res['numbered']}\n```"
+
+    # 2. Single line: line 45 of <path> / line 10 in <path>
+    m_single = re.search(
+        r"\b(?:show|read|display|view|get|trace)\s+line\s+(\d+)\s+(?:of|in|from)\s+[\"']?([A-Za-z]:\\[^\s\"']+|[^\s\"']+)[\"']?",
+        message,
+        re.I,
+    )
+    if m_single:
+        line_no = int(m_single.group(1))
+        raw_p = m_single.group(2).strip().rstrip(".,;:")
+        from tools.file_tool import FileTool
+
+        res = FileTool.read_file_lines(raw_p, max(1, line_no - 3), line_no + 3)
+        if res.get("status") == "success":
+            return f"**File:** `{res['path']}` (Around line {line_no})\n\n```text\n{res['numbered']}\n```"
+    return None
+
+
+def _try_find_files_or_content(message: str) -> str | None:
+    """Live search for files or content across any directory or the entire OS."""
+    low = (message or "").lower().strip()
+    if not re.search(r"\b(find|search|grep|locate|where\s+is)\b", low):
+        return None
+
+    # 1. Content search: grep / search for / search text / find lines containing ... in <path>
+    m_grep = re.search(
+        r"\b(?:grep|search\s+for|search\s+text|find\s+lines?\s+containing|trace)\s+[\"']([^\"']+)[\"']\s+(?:in|across|under)\s+[\"']?([A-Za-z]:\\[^\s\"']+|[^\s\"']+)[\"']?",
+        message,
+        re.I,
+    )
+    if not m_grep:
+        m_grep = re.search(
+            r"\b(?:grep|search\s+for|search\s+text|find\s+lines?\s+with)\s+([A-Za-z0-9_\-\.]+)\s+(?:in|across|under)\s+[\"']?([A-Za-z]:\\[^\s\"']+|[^\s\"']+)[\"']?",
+            message,
+            re.I,
+        )
+
+    if m_grep:
+        query = m_grep.group(1).strip()
+        raw_path = m_grep.group(2).strip().rstrip(".,;:")
+        from tools.file_tool import FileTool
+
+        res = FileTool.search_file_content(raw_path, query, max_results=20)
+        if res.get("status") == "success":
+            matches = res.get("matches", [])
+            if not matches:
+                return f"No matches found for `{query}` under `{raw_path}` (scanned {res.get('scanned_files', 0)} files)."
+            lines = [f"Found {len(matches)} match(es) for `{query}` under `{raw_path}`:\n"]
+            for m in matches[:15]:
+                lines.append(f"- `{m['file']}` (line {m['line_number']}): `{m['line_content'].strip()}`")
+            return "\n".join(lines)
+
+    # 2. File lookup: find file / where is file / locate file ...
+    m_find = re.search(
+        r"\b(?:find\s+file|locate\s+file|where\s+is\s+(?:the\s+)?file|search\s+file)\s+[\"']?([A-Za-z0-9_\-\.\*]+)[\"']?",
+        message,
+        re.I,
+    )
+    if m_find:
+        pat = m_find.group(1).strip().rstrip(".,;:")
+        if len(pat) >= 2 and not pat.lower().startswith("http"):
+            m_root = re.search(r"(?:in|under|on)\s+[\"']?([A-Za-z]:\\[^\s\"']+)[\"']?", message, re.I)
+            root_dir = m_root.group(1).strip().rstrip(".,;:") if m_root else ""
+            if not root_dir:
+                from core.desktop_scanner import projects_dir
+
+                root_dir = str(projects_dir())
+            from tools.file_tool import FileTool
+
+            pattern = pat if ("*" in pat or "?" in pat) else f"*{pat}*"
+            res = FileTool.find_files(root_path=root_dir, pattern=pattern, max_results=15)
+            if res.get("status") == "success":
+                results = res.get("results", [])
+                if not results:
+                    return f"No files matching `{pat}` found under `{root_dir}`."
+                lines = [f"Found {len(results)} item(s) matching `{pat}` under `{root_dir}`:\n"]
+                for r in results:
+                    kind = "[DIR] " if r["is_directory"] else "[FILE]"
+                    lines.append(f"- {kind} `{r['path']}`")
+                return "\n".join(lines)
+
+    return None
 
 
 def _try_open_project_folder(message: str) -> str | None:
@@ -408,6 +531,205 @@ def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _conversational_reply(
+    message: str,
+    *,
+    history: list[dict[str, str]] | None = None,
+    on_token: Any = None,
+    multi_prefix: str = "",
+    strategy: str = "FAST",
+) -> str:
+    """FAST/advisory chat: model only. No tool loop, no TurboVec on FAST."""
+    from core.chat_thread import (
+        focus_context_for_message,
+        history_for_model,
+        update_focus_after_turn,
+    )
+    from core.execution_mode import MODE_FAST
+    from core.llm import fast_chat
+    from core.project_resolve import (
+        known_project_names,
+        project_path_for_name,
+        resolve_project_from_query,
+    )
+    from core.reply_format import REPLY_FORMAT_RULES
+    from tools.self_inspect import project_root
+
+    low_msg = message.lower().strip()
+    root = project_root()
+    rag_bits = ""
+    memory_bits = ""
+    mentioned = None if strategy == MODE_FAST else resolve_project_from_query(message)
+    if not mentioned:
+        try:
+            from core.agent_state import AgentState
+
+            st = AgentState()
+            if re.search(
+                r"\b(the\s+project|this\s+project|the\s+repo|this\s+repo|the\s+codebase|this\s+codebase|what\s+the\s+project\s+is|what\s+this\s+is|about\s+it)\b",
+                message.lower(),
+            ):
+                mentioned = st.active_project or (
+                    st.chat_focus.get("title") if isinstance(st.chat_focus, dict) else None
+                )
+        except Exception:
+            pass
+
+    project_note = ""
+    thread_note = focus_context_for_message(message)
+
+    try:
+        ke = None
+        if not (strategy == MODE_FAST and not mentioned):
+            from knowledge.engine import KnowledgeEngine
+
+            ke = KnowledgeEngine()
+        if ke is not None and mentioned:
+            try:
+                from core.agent_state import AgentState
+
+                st = AgentState()
+                st.active_project = mentioned
+                st.save()
+            except Exception:
+                pass
+            chunks = 0
+            try:
+                chunks = ke._vector_store.count_by_project(mentioned)  # noqa: SLF001
+            except Exception:
+                chunks = 0
+            ppath = project_path_for_name(mentioned)
+            if chunks <= 0:
+                from core.desktop_scanner import explain_project_from_disk
+
+                disk_exp = explain_project_from_disk(mentioned)
+                if disk_exp:
+                    return (multi_prefix + disk_exp).strip()
+                where = str(ppath) if ppath else mentioned
+                return (
+                    f"I know you mean {mentioned} "
+                    f"({where}), but no README or indexed code was found yet.\n\n"
+                    f"Say `/open {where}` or ask me to inspect its files."
+                )
+            project_note = (
+                f"Reyansh is asking about project {mentioned} "
+                f"({ppath or 'Desktop/Projects'}), which has {chunks} TurboVec chunks. "
+                f"Answer from retrieved code context about THIS project only — "
+                f"not a generic stock-trading app."
+            )
+            rag_bits = (
+                ke.get_routing_context(message, n_results=8) or ""
+            ).strip()
+        elif ke is not None:
+            if not thread_note and strategy != MODE_FAST:
+                rag_bits = (ke.get_routing_context(message, n_results=4) or "").strip()
+        if ke is not None and (strategy != MODE_FAST or mentioned):
+            try:
+                memory_bits = (ke._memory.get_full_summary(  # noqa: SLF001
+                    mentioned or ke.get_active_project_name() or ""
+                ) or "").strip()
+            except Exception:
+                memory_bits = ""
+        else:
+            memory_bits = ""
+    except Exception:
+        pass
+
+    known = ""
+    if strategy != MODE_FAST:
+        known = ", ".join(known_project_names()[:24])
+    system = (
+        "You are Immortility, Reyansh's desktop AI running locally. "
+        f"Your codebase root is `{root}`. "
+        "Answer only from the conversation, retrieved code, or a tool result. "
+        "If you do not have that information, say so. Do not invent files, links, or project features. "
+        "When he pastes a URL and asks about it, answers must come from fetched page text "
+        "(inspect_url) — never invent a project's purpose. "
+        "When he names a Desktop project, summarize from retrieved local context. "
+        f"{('Known projects: ' + known + '. ') if known else ''}"
+        "Conversation continuity is critical: if he refers to 'the project', 'it', 'this', "
+        "or asks how to start something you already discussed in this chat, CONTINUE that "
+        "same idea with concrete next steps. Do not web-search. Do not invent a list of "
+        "Medium articles. Prefer the plan already in the chat history / ongoing topic. "
+        "If he asks to index/read projects and it wasn't done yet, tell him to say "
+        "'index my desktop projects' or `/open <path>` — the HUD runs real ingest. "
+        "Never say you cannot access files or invent Microsoft/Medium web links "
+        "when asked about YOUR vector DB / RAG / knowledge folder. "
+        "Address him as Reyansh. For voice, keep answers shorter. "
+        "For chat, finish the answer — never stop mid-sentence. "
+        f"{REPLY_FORMAT_RULES}"
+    )
+    if re.search(r"\b(what can you do|capabilities|capability|features|what are you able to|who are you|help)\b", low_msg):
+        try:
+            from core.capabilities import capability_card
+
+            system += "\n\nCapability card (authoritative; do not invent others):\n" + capability_card()
+        except Exception:
+            pass
+    if thread_note:
+        system += f"\n\n{thread_note}"
+    if project_note:
+        system += f"\n\n{project_note}"
+    if memory_bits:
+        system += f"\n\nMemory pack:\n{memory_bits[:1200]}"
+    if re.search(r"\b(who am i|my name|about me|my resume|my background|ey|internship|mirage|my skills|my profile)\b", low_msg):
+        try:
+            from memory.user_profile import get_about_me
+
+            about = get_about_me()
+            if about:
+                system += (
+                    "\n\nReyansh's saved profile:\n"
+                    f"{about[:2000]}"
+                )
+        except Exception:
+            pass
+    if rag_bits and not thread_note:
+        system += f"\n\nRetrieved local code context:\n{rag_bits[:2500]}"
+    elif mentioned:
+        system += (
+            f"\n\nNo code snippets retrieved for `{mentioned}` — say you need a "
+            f"re-index rather than inventing features."
+        )
+    try:
+        from memory.outcome_memory import lessons_for_prompt
+
+        lessons = lessons_for_prompt(message)
+        if lessons:
+            system += f"\n\n{lessons}"
+    except Exception:
+        pass
+
+    hist = history_for_model(history, max_turns=8 if strategy == MODE_FAST else 12)
+    try:
+        from core.config import get_config
+
+        cfg = get_config()
+        tokens = (
+            cfg.fast_chat_max_tokens if strategy == MODE_FAST else cfg.chat_max_tokens
+        )
+    except Exception:
+        tokens = 2048
+    reply = fast_chat(
+        message,
+        history=hist,
+        system=system,
+        max_output_tokens=tokens,
+        on_token=on_token,
+    )
+    try:
+        update_focus_after_turn(message, reply, hist)
+    except Exception:
+        pass
+    try:
+        from memory.outcome_memory import get_outcome_memory
+
+        get_outcome_memory().set_pending(message, "CHAT", reply)
+    except Exception:
+        pass
+    return (multi_prefix + reply).strip() if multi_prefix else reply
+
+
 def handle_hud_request(
     message: str,
     *,
@@ -474,6 +796,15 @@ def handle_hud_request(
         logger.debug("pending check: %s", exc)
 
     try:
+        from core.intent import instant_reply
+
+        greeting = instant_reply(message)
+        if greeting:
+            return greeting
+    except Exception:
+        pass
+
+    try:
         from core.capabilities import answer_capability_question, wants_capability_report
 
         if wants_capability_report(message):
@@ -499,6 +830,35 @@ def handle_hud_request(
         logger.exception("HUD knowledge/index failed")
         return f"Indexing failed: {exc}"
 
+    # "this is about me, remember this" — store bio, never steal into HUD face edits
+    try:
+        from memory.user_profile import handle_remember_about_me
+
+        remembered = handle_remember_about_me(message)
+        if remembered:
+            try:
+                from rich.console import Console
+
+                Console().print("[bold cyan][HUD → Profile][/bold cyan] saved about_me")
+            except Exception:
+                pass
+            return (multi_prefix + remembered).strip() if multi_prefix else remembered
+    except Exception as exc:
+        logger.debug("remember about me failed: %s", exc)
+
+    from core.execution_mode import MODE_FAST, classify_strategy
+    from core.harness.tracing import begin_turn
+
+    if classify_strategy(message) == MODE_FAST:
+        begin_turn(mode=MODE_FAST)
+        return _conversational_reply(
+            message,
+            history=history,
+            on_token=on_token,
+            multi_prefix=multi_prefix,
+            strategy=MODE_FAST,
+        )
+
     # URL inspect — fetch GitHub/YouTube/web content. Do NOT open Chrome and invent.
     try:
         from tools.link_inspect import handle_link_inspect, wants_link_inspect
@@ -515,22 +875,6 @@ def handle_hud_request(
     except Exception as exc:
         logger.exception("HUD link inspect failed")
         return f"I couldn't read that link: {exc}"
-
-    # "this is about me, remember this" — store bio, never steal into HUD face edits
-    try:
-        from memory.user_profile import handle_remember_about_me
-
-        remembered = handle_remember_about_me(message)
-        if remembered:
-            try:
-                from rich.console import Console
-
-                Console().print("[bold cyan][HUD → Profile][/bold cyan] saved about_me")
-            except Exception:
-                pass
-            return (multi_prefix + remembered).strip() if multi_prefix else remembered
-    except Exception as exc:
-        logger.debug("remember about me failed: %s", exc)
 
     # Face / HUD beautify — deterministic edit (local 8B fails on 1000-line HTML)
     if _wants_face_beautify(message):
@@ -588,6 +932,15 @@ def handle_hud_request(
 
     # (folder + browser already handled above via multi_actions)
 
+    # Live file / line tracing across the OS (deterministic, zero token waste)
+    line_trace = _try_trace_file_or_lines(message)
+    if line_trace:
+        return (multi_prefix + line_trace).strip()
+
+    file_search = _try_find_files_or_content(message)
+    if file_search:
+        return (multi_prefix + file_search).strip()
+
     # Single-folder deterministic scan (no inferred/fake files).
     one_scan = _try_scan_single_folder(message)
     if one_scan:
@@ -605,6 +958,20 @@ def handle_hud_request(
     except Exception:
         pass
 
+    # Project explanation from live README / manifest — no TurboVec prerequisite
+    try:
+        from core.desktop_scanner import explain_project_from_disk, wants_project_explanation
+
+        if wants_project_explanation(message):
+            from core.project_resolve import resolve_project_from_query
+
+            cand_proj = resolve_project_from_query(message)
+            exp = explain_project_from_disk(cand_proj)
+            if exp:
+                return (multi_prefix + exp).strip()
+    except Exception:
+        pass
+
     # Working-tree / git changes — before RAG/web. Those paths invent files.
     try:
         from tools.git_tool import answer_repo_changes, wants_repo_changes
@@ -617,16 +984,18 @@ def handle_hud_request(
 
     # Shared source router — WEB only when policy says so (with RAG context)
     try:
-        from core.source_router import choose_source
+        from core.source_router import choose_source, needs_live_web
 
         routing_ctx = ""
-        try:
-            from knowledge.engine import KnowledgeEngine
+        # Only query vector DB if query could possibly need live web and we want to check if RAG already knows it
+        if needs_live_web(message):
+            try:
+                from knowledge.engine import KnowledgeEngine
 
-            # Cheap memory-aware signal so we don't web-search when RAG already knows
-            routing_ctx = KnowledgeEngine().get_routing_context(message, n_results=4) or ""
-        except Exception:
-            routing_ctx = ""
+                # Cheap memory-aware signal so we don't web-search when RAG already knows
+                routing_ctx = KnowledgeEngine().get_routing_context(message, n_results=2) or ""
+            except Exception:
+                routing_ctx = ""
 
         _src = choose_source(message, routing_context=routing_ctx)
         if _src.source == "WEB":
@@ -738,7 +1107,7 @@ def handle_hud_request(
     # never route them to the action engine (which web-searches and dumps Medium links).
     from core.chat_thread import is_advisory_chat
     from core.execution_mode import MODE_AGENT, MODE_BACKGROUND, MODE_FAST
-    from core.harness import begin_turn
+    from core.harness.tracing import begin_turn
     from core.router import classify_strategy
 
     advisory = is_advisory_chat(message)
@@ -852,170 +1221,10 @@ def handle_hud_request(
     if project_open:
         return project_open
 
-    # Conversational reply (with local memory + optional RAG snippets)
-    from core.chat_thread import (
-        focus_context_for_message,
-        history_for_model,
-        update_focus_after_turn,
-    )
-    from core.llm import fast_chat
-    from core.project_resolve import (
-        known_project_names,
-        project_path_for_name,
-        resolve_project_from_query,
-    )
-    from core.reply_format import REPLY_FORMAT_RULES
-    from tools.self_inspect import project_root
-
-    root = project_root()
-    rag_bits = ""
-    memory_bits = ""
-    mentioned = resolve_project_from_query(message)
-    project_note = ""
-    thread_note = focus_context_for_message(message)
-
-    try:
-        from knowledge.engine import KnowledgeEngine
-
-        ke = KnowledgeEngine()
-        if mentioned:
-            try:
-                from core.agent_state import AgentState
-
-                st = AgentState()
-                st.active_project = mentioned
-                st.save()
-            except Exception:
-                pass
-            chunks = 0
-            try:
-                chunks = ke._vector_store.count_by_project(mentioned)  # noqa: SLF001
-            except Exception:
-                chunks = 0
-            ppath = project_path_for_name(mentioned)
-            if chunks <= 0:
-                where = str(ppath) if ppath else mentioned
-                return (
-                    f"I know you mean {mentioned} "
-                    f"({where}), but it is not in TurboVec yet "
-                    f"(0 chunks — likely a broken earlier index pass).\n\n"
-                    f"Say `/open {where}` or index {mentioned} and I will "
-                    f"re-embed it, then ask me again."
-                )
-            project_note = (
-                f"Reyansh is asking about project {mentioned} "
-                f"({ppath or 'Desktop/Projects'}), which has {chunks} TurboVec chunks. "
-                f"Answer from retrieved code context about THIS project only — "
-                f"not a generic stock-trading app."
-            )
-            rag_bits = (
-                ke.get_routing_context(message, n_results=8) or ""
-            ).strip()
-        else:
-            # FAST: conversation window only — no TurboVec dump.
-            if not thread_note and strategy != MODE_FAST:
-                rag_bits = (ke.get_routing_context(message, n_results=4) or "").strip()
-        if strategy != MODE_FAST or mentioned:
-            try:
-                memory_bits = (ke._memory.get_full_summary(  # noqa: SLF001
-                    mentioned or ke.get_active_project_name() or ""
-                ) or "").strip()
-            except Exception:
-                memory_bits = ""
-        else:
-            memory_bits = ""
-    except Exception:
-        pass
-
-    known = ", ".join(known_project_names()[:24])
-    system = (
-        "You are Immortility, Reyansh's desktop AI running locally. "
-        f"Your codebase root is `{root}`. "
-        f"RAG lives in `{root / 'rag'}`, orchestration in `{root / 'knowledge'}`, "
-        f"TurboVec DB in `{root / '.vector_db'}`. "
-        "Backend actions run in the Immortility terminal. "
-        "When he pastes a URL and asks about it, answers must come from fetched page text "
-        "(inspect_url) — never invent a project's purpose. "
-        "When he names a Desktop project (e.g. 'stocks app' = stocks_app), treat it as "
-        "THAT codebase — summarize from retrieved local context, never invent a generic app. "
-        f"Known projects: {known}. "
-        "Conversation continuity is critical: if he refers to 'the project', 'it', 'this', "
-        "or asks how to start something you already discussed in this chat, CONTINUE that "
-        "same idea with concrete next steps. Do not web-search. Do not invent a list of "
-        "Medium articles. Prefer the plan already in the chat history / ongoing topic. "
-        "If he asks to index/read projects and it wasn't done yet, tell him to say "
-        "'index my desktop projects' or `/open <path>` — the HUD runs real ingest. "
-        "Never say you cannot access files or invent Microsoft/Medium web links "
-        "when asked about YOUR vector DB / RAG / knowledge folder. "
-        "Address him as Reyansh. For voice, keep answers shorter. "
-        "For chat, finish the answer — never stop mid-sentence. "
-        f"{REPLY_FORMAT_RULES}"
-    )
-    try:
-        from core.capabilities import capability_card
-
-        system += "\n\nCapability card (authoritative; do not invent others):\n" + capability_card()
-    except Exception:
-        pass
-    if thread_note:
-        system += f"\n\n{thread_note}"
-    if project_note:
-        system += f"\n\n{project_note}"
-    if memory_bits:
-        system += f"\n\nMemory pack:\n{memory_bits[:1600]}"
-    try:
-        from memory.user_profile import get_about_me
-
-        about = get_about_me()
-        if about:
-            system += (
-                "\n\nReyansh's saved profile (use when he asks about himself, "
-                "his resume, EY internship, Immortility, Mirage, or skills):\n"
-                f"{about[:2500]}"
-            )
-    except Exception:
-        pass
-    if rag_bits and not thread_note:
-        system += f"\n\nRetrieved local code context:\n{rag_bits[:3500]}"
-    elif mentioned:
-        system += (
-            f"\n\nNo code snippets retrieved for `{mentioned}` — say you need a "
-            f"re-index rather than inventing features."
-        )
-    try:
-        from memory.outcome_memory import lessons_for_prompt
-
-        lessons = lessons_for_prompt(message)
-        if lessons:
-            system += f"\n\n{lessons}"
-    except Exception:
-        pass
-
-    hist = history_for_model(history, max_turns=16)
-    try:
-        from core.config import get_config
-
-        cfg = get_config()
-        tokens = (
-            cfg.fast_chat_max_tokens if strategy == MODE_FAST else cfg.chat_max_tokens
-        )
-    except Exception:
-        tokens = 2048
-    reply = fast_chat(
+    return _conversational_reply(
         message,
-        history=hist,
-        system=system,
-        max_output_tokens=tokens,
+        history=history,
         on_token=on_token,
+        multi_prefix=multi_prefix,
+        strategy=strategy,
     )
-    try:
-        update_focus_after_turn(message, reply, hist)
-    except Exception:
-        pass
-    try:
-        from memory.outcome_memory import get_outcome_memory
-
-        get_outcome_memory().set_pending(message, "CHAT", reply)
-    except Exception:
-        pass
-    return reply

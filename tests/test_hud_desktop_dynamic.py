@@ -47,6 +47,20 @@ def test_resolve_scan_target_by_number_and_name(tmp_path, monkeypatch):
     assert by_num.name == "AlgoVerse"
 
 
+def test_advice_prompt_is_not_a_hardcoded_folder_listing():
+    from core.desktop_scanner import wants_single_folder_scan
+    from tools.hud_agent import _try_scan_single_folder
+
+    msg = (
+        "check out my project Forge and i want to u tell me how i can "
+        "make it best unique and production ready"
+    )
+    assert not wants_single_folder_scan(msg)
+    assert _try_scan_single_folder(msg) is None
+    assert wants_single_folder_scan("scan Forge")
+    assert wants_single_folder_scan("now scan algoverse folder on desktop")
+
+
 def test_hud_scan_uses_deterministic_folder_report(tmp_path, monkeypatch):
     desktop = tmp_path / "Desktop"
     projects = desktop / "Projects"

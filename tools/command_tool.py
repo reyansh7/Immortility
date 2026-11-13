@@ -236,6 +236,24 @@ def _resolve_cwd(cwd: str | None) -> tuple[str | None, dict | None]:
             "timed_out": False,
             "cancelled": False,
         }
+    try:
+        from core.fs_sandbox import check_path
+
+        ok, _, err = check_path(path, write=False)
+        if not ok:
+            return None, {
+                "status": "error",
+                "error_code": "SANDBOX_CWD",
+                "message": err,
+                "cwd": path,
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": False,
+                "cancelled": False,
+            }
+    except Exception:
+        pass
     return path, None
 
 
@@ -257,7 +275,7 @@ def _record_command_trace(
     detail: str = "",
 ) -> None:
     try:
-        from core.harness import TraceEvent, record
+        from core.harness.tracing import TraceEvent, record
 
         record(
             TraceEvent(

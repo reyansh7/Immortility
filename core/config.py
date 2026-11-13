@@ -69,8 +69,16 @@ class ImmortilityConfig:
     openai_timeout_seconds: float = 120.0
     ollama_think: bool = False
 
+    # Agent backend selection.
+    # "immortality" — custom first-party harness (default, always available)
+    # "hermes"      — optional external Hermes gateway (requires HERMES_API_KEY + server)
+    # "legacy"      — alias for "immortality" (back-compat)
+    agent_backend: str = "immortality"
+
+    # Task persistence (Milestone 1)
+    tasks_db_path: str = "tasks.db"
+
     # Hermes native agent/harness API.  Secrets remain environment-only.
-    agent_backend: str = "hermes"
     hermes_base_url: str = "http://127.0.0.1:8642"
     hermes_api_key: str = ""
     hermes_timeout_seconds: float = 300.0
@@ -130,7 +138,8 @@ class ImmortilityConfig:
             decision_max_retries=_env_int("IMMORTILITY_MAX_RETRIES", 3),
             openai_timeout_seconds=_env_float("IMMORTILITY_LLM_TIMEOUT", 120.0),
             ollama_think=_env_bool("IMMORTILITY_OLLAMA_THINK", False),
-            agent_backend=(os.environ.get("IMMORTILITY_AGENT_BACKEND") or "hermes").strip().lower(),
+            agent_backend=(os.environ.get("IMMORTILITY_AGENT_BACKEND") or "immortality").strip().lower(),
+            tasks_db_path=(os.environ.get("IMMORTILITY_TASKS_DB") or "tasks.db").strip(),
             hermes_base_url=(os.environ.get("HERMES_BASE_URL") or "http://127.0.0.1:8642").strip(),
             hermes_api_key=(os.environ.get("HERMES_API_KEY") or os.environ.get("API_SERVER_KEY") or "").strip(),
             hermes_timeout_seconds=_env_float("HERMES_TIMEOUT_SECONDS", 300.0),
@@ -159,6 +168,12 @@ def get_config() -> ImmortilityConfig:
 
 def reset_config_cache() -> None:
     get_config.cache_clear()
+    try:
+        from core.fs_sandbox import reset_fs_sandbox
+
+        reset_fs_sandbox()
+    except Exception:
+        pass
 
 
 def load_prompt_file(name: str, **fmt: str) -> str:

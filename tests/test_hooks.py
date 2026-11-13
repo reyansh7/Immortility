@@ -9,7 +9,7 @@ from core.hooks import (
     get_hook_runner,
     reset_hook_runner,
 )
-from core.harness import last_turn, reset_for_tests
+from core.harness.tracing import last_turn, reset_for_tests
 
 
 def setup_function() -> None:

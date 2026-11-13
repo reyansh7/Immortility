@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from core.harness import MODE_AGENT, MODE_BACKGROUND, MODE_FAST
+from core.harness.tracing import MODE_AGENT, MODE_BACKGROUND, MODE_FAST
 from core.intent import is_coding_intent
 from core.project_extract import is_run_project_request
 
@@ -38,6 +38,8 @@ _AGENT_HINTS = (
     r"\b(look (at|through) (this|the) (code|repo|project|file))\b",
     r"\b(git (status|diff|log)|uncommitted|working tree)\b",
     r"\b(what(?:'s|s)? changed|made changes|find (out )?(those |the )?changes)\b",
+    r"\b(scan|analy[sz]e|leetcode)\b",
+    r"\b(folder|on (the |my )?desktop)\b",
 )
 
 _FAST_HINTS = (

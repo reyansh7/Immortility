@@ -33,3 +33,8 @@ def test_greeting_is_fast():
     assert classify_strategy("hello") == MODE_FAST
     assert classify_strategy("what model are you") == MODE_FAST
     assert classify_strategy("tell me what you can do now") == MODE_FAST
+
+
+def test_folder_scan_is_agent_strategy():
+    assert classify_strategy("now scan algoverse folder on desktop") == MODE_AGENT
+    assert classify_strategy("analyze this folder") == MODE_AGENT

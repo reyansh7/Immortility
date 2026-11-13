@@ -421,6 +421,12 @@ def wants_browser_action(message: str) -> bool:
     low = _fix_typos((message or "").lower())
     if not low.strip():
         return False
+    # Never steal local file / directory / line searches
+    if re.search(r"[A-Za-z]:\\[^\s\"']+", message) or re.search(
+        r"\b(find|search|grep|locate)\s+(?:file|files|folder|directory|dir|code|lines?)\b",
+        low,
+    ):
+        return False
     try:
         from tools.link_inspect import wants_link_inspect
 

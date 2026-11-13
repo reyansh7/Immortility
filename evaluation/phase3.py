@@ -16,7 +16,7 @@ from core.coding_engine import (
     infer_plan,
     run_coding_loop,
 )
-from core.harness import last_turn, reset_for_tests
+from core.harness.tracing import last_turn, reset_for_tests
 
 
 @dataclass

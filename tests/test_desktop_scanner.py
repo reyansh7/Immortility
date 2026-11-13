@@ -40,6 +40,14 @@ def test_wants_projects_scan_phrases():
     assert wants_projects_scan("analyze all the projects in my desktop")
     assert wants_projects_scan("There are many other folders not just three")
     assert wants_projects_scan("what projects am I working on")
+    assert wants_projects_scan("scan my pc")
+    assert wants_projects_scan("scan pc")
+    assert wants_projects_scan("pc scan")
+    assert wants_projects_scan("scan my computer")
+    assert wants_projects_scan("scan system")
+    assert wants_projects_scan("scan my desktop")
+    assert wants_projects_scan("scan machine")
+    assert wants_projects_scan("scan projects")
     assert not wants_projects_scan("fix the login bug in auth.py")
     # Must NOT steal coding / LeetCode / write-file intents
     assert not wants_projects_scan("write it in python and create a new file in desktop")
@@ -50,6 +58,37 @@ def test_wants_projects_scan_phrases():
     assert not wants_projects_scan("read the projects")
     assert not wants_projects_scan(r"/open C:\Users\reyan\OneDrive\Desktop\Projects")
     assert not wants_projects_scan("ingest all projects on desktop")
+
+
+def test_answer_scan_my_pc_returns_live_report():
+    from core.desktop_scanner import answer_desktop_projects_query
+
+    reply = answer_desktop_projects_query("scan my pc", learn=False)
+    assert "# Desktop/Projects — live scan" in reply
+    assert "**Folder count:**" in reply
+    assert "## Folders inside Desktop/Projects" in reply
+    assert "Also on Desktop" in reply
+
+
+def test_resolve_scan_target_explicit_windows_path():
+    from pathlib import Path
+    from core.desktop_scanner import format_single_folder_report, resolve_scan_target
+
+    target = resolve_scan_target("scan my  C:\\Users\\reyan")
+    assert target is not None
+    assert target == Path("C:\\Users\\reyan").resolve()
+
+    report = format_single_folder_report(target)
+    assert "Path: `C:\\Users\\reyan`" in report
+    assert "Top-level folders:" in report
+
+
+def test_hud_scan_explicit_path():
+    from tools.hud_agent import handle_hud_request
+
+    reply = handle_hud_request("scan my  C:\\Users\\reyan")
+    assert "Path: `C:\\Users\\reyan`" in reply
+    assert "Top-level folders:" in reply
 
 
 def test_format_projects_report_lists_all():
@@ -77,3 +116,21 @@ def test_answer_existence_query_is_concise():
     # Should not dump every file tree
     assert "node_modules" not in low
     assert len(reply) < 900
+
+
+def test_explain_project_from_disk_and_followup():
+    from core.desktop_scanner import explain_project_from_disk, wants_project_explanation
+    from tools.hud_agent import handle_hud_request
+
+    assert wants_project_explanation("explain what the project is")
+    assert wants_project_explanation("what is LedgerOS")
+    assert wants_project_explanation("explain the codebase")
+
+    # Scan LedgerOS first
+    scan_res = handle_hud_request("scan LedgerOS")
+    assert "LedgerOS" in scan_res
+
+    # Follow up asking to explain what the project is
+    exp_res = handle_hud_request("explain what the project is")
+    assert "LedgerOS" in exp_res
+    assert "Financial Intelligence" in exp_res or "Path:" in exp_res

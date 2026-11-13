@@ -75,6 +75,10 @@ def workflow_db_path() -> Path:
     return _ROOT / "workflow.db"
 
 
+def tasks_db_path() -> Path:
+    return _ROOT / "tasks.db"
+
+
 def main_log_path() -> Path:
     return logs_dir() / "immortility.log"
 

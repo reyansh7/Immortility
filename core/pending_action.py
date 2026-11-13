@@ -38,6 +38,13 @@ CONFIRMATION_TOOLS = frozenset({
     "docker_stop",
     "docker_rm",
     "db_execute",
+    "computer_launch_app",
+    "computer_focus_window",
+    "computer_close_window",
+    "computer_click",
+    "computer_type",
+    "computer_press_key",
+    "computer_hotkey",
 })
 
 # Explicit navigation / open — user asked; no confirmation.
@@ -55,6 +62,10 @@ READ_ONLY_TOOLS = frozenset({
     "list_tabs",
     "switch_tab",
     "read_file",
+    "read_file_lines",
+    "search_file_content",
+    "find_files",
+    "scan_storage",
     "list_directory",
     "take_screenshot",
     "find_symbol",
@@ -83,6 +94,10 @@ READ_ONLY_TOOLS = frozenset({
     "db_query",
     "db_mongo_find",
     "discover_tools",
+    "computer_list_windows",
+    "computer_get_active_window",
+    "computer_get_accessibility_tree",
+    "computer_screenshot",
     "DONE",
 })
 
@@ -239,4 +254,19 @@ def format_confirmation_message(tool_name: str, args: dict) -> str:
         "replace_regex", "append_file", "delete_block", "rename_symbol", "apply_patch",
     }:
         return f"I am about to modify:\n{args.get('path')}\nvia `{tool_name}`.\nProceed? (yes/no)"
+    if tool_name == "computer_launch_app":
+        return f"I am about to launch application '{args.get('name') or args.get('path')}'.\nProceed? (yes/no)"
+    if tool_name == "computer_close_window":
+        return f"{prefix}I am about to close window '{args.get('title') or args.get('handle')}'.\nProceed? (yes/no)"
+    if tool_name == "computer_focus_window":
+        return f"I am about to focus window '{args.get('title') or args.get('handle')}'.\nProceed? (yes/no)"
+    if tool_name == "computer_click":
+        target = args.get("name") or args.get("role") or f"coordinates ({args.get('x')}, {args.get('y')})"
+        return f"I am about to click {target}.\nProceed? (yes/no)"
+    if tool_name == "computer_type":
+        return f"I am about to type text into active window.\nProceed? (yes/no)"
+    if tool_name == "computer_hotkey":
+        return f"I am about to dispatch keyboard hotkey '{'+'.join(args.get('keys', []))}'.\nProceed? (yes/no)"
+    if tool_name == "computer_press_key":
+        return f"I am about to press key '{args.get('key')}'.\nProceed? (yes/no)"
     return f"{prefix}I am about to run tool '{tool_name}' with args {args}.\nProceed? (yes/no)"

@@ -95,11 +95,12 @@ class VectorStore:
 
     # ── Lazy connection ─────────────────────────────────────────────
 
-    def _ensure_connected(self) -> None:
-        if self._index is not None and self._conn is not None:
+    def _ensure_db(self) -> None:
+        """Open the SQLite sidecar only. Listing projects must not load the index."""
+        if self._conn is not None:
             return
         with self._lock:
-            if self._index is not None and self._conn is not None:
+            if self._conn is not None:
                 return
             self._root.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(
@@ -127,6 +128,14 @@ class VectorStore:
             )
             self._conn.commit()
 
+    def _ensure_connected(self) -> None:
+        if self._index is not None and self._conn is not None:
+            return
+        with self._lock:
+            self._ensure_db()
+            if self._index is not None:
+                return
+
             from turbovec import IdMapIndex
 
             if self._index_path.is_file():
@@ -136,6 +145,12 @@ class VectorStore:
                     logger.warning(
                         "TurboVec load failed (%s) — creating empty index", exc
                     )
+                    try:
+                        bak = self._index_path.with_suffix(".tvim.bak")
+                        if self._index_path.exists():
+                            self._index_path.replace(bak)
+                    except Exception:
+                        pass
                     self._index = IdMapIndex(dim=_embedding_dim(), bit_width=_bit_width())
             else:
                 self._index = IdMapIndex(dim=_embedding_dim(), bit_width=_bit_width())
@@ -411,14 +426,14 @@ class VectorStore:
 
     def count(self) -> int:
         """Return the number of chunks in the collection."""
-        self._ensure_connected()
+        self._ensure_db()
         assert self._conn is not None
         row = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return int(row[0]) if row else 0
 
     def count_by_file(self, filename: str) -> int:
         """How many chunks are tagged with this absolute filepath."""
-        self._ensure_connected()
+        self._ensure_db()
         assert self._conn is not None
         row = self._conn.execute(
             "SELECT COUNT(*) FROM chunks WHERE filename = ?",
@@ -428,7 +443,7 @@ class VectorStore:
 
     def count_by_project(self, project: str) -> int:
         """How many chunks are tagged with this project name."""
-        self._ensure_connected()
+        self._ensure_db()
         assert self._conn is not None
         row = self._conn.execute(
             "SELECT COUNT(*) FROM chunks WHERE project = ?",
@@ -438,7 +453,7 @@ class VectorStore:
 
     def list_projects(self) -> list[tuple[str, int]]:
         """Return (project_name, chunk_count) pairs present in the store."""
-        self._ensure_connected()
+        self._ensure_db()
         assert self._conn is not None
         rows = self._conn.execute(
             "SELECT project, COUNT(*) FROM chunks "

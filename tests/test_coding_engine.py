@@ -29,7 +29,7 @@ from core.coding_engine import (
     run_coding_loop,
     wants_coding_loop,
 )
-from core.harness import last_turn, reset_for_tests
+from core.harness.tracing import last_turn, reset_for_tests
 from core.pending_action import needs_confirmation
 
 

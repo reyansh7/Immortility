@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from core.event_bus import EventBus
-from core.harness import MODE_FAST, TraceEvent, begin_turn, current_scope, new_id, record
+from core.harness.tracing import MODE_FAST, TraceEvent, begin_turn, current_scope, new_id, record
 from core.permissions import DENY, decide
 
 logger = logging.getLogger(__name__)

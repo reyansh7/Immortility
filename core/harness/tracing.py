@@ -1,7 +1,6 @@
 """Slice H — harness foundation: measurable executions, not a benchmark suite.
 
-Every model / tool / task call can emit a trace. Slice 7 (full evaluation) will
-consume these records later. This module does not know about reference tasks.
+Every model / tool / task call can emit a trace. This module records execution traces.
 """
 
 from __future__ import annotations

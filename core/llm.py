@@ -260,9 +260,13 @@ def _fallback_model(primary: str) -> str | None:
         candidate = fallback_model_id(primary=primary, provider=_local_provider_name())
     except Exception as exc:
         logger.debug("Registry fallback lookup failed: %s", exc)
-        return None
+        candidate = None
     if candidate and candidate != primary:
         return candidate
+    if _local_provider_name() == "nvidia":
+        for cand in ("meta/llama-3.2-11b-vision-instruct", "openai/gpt-oss-20b"):
+            if cand != primary:
+                return cand
     return None
 
 
@@ -344,7 +348,7 @@ def _openai_client(base_url: str, api_key: str):
             timeout = float(get_config().openai_timeout_seconds)
         except Exception:
             timeout = 120.0
-        client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=min(timeout, 30.0), max_retries=1)
         _openai_clients[key] = client
         return client
 
@@ -636,11 +640,17 @@ def _chat_openai_compat(
     kwargs.pop("format", None)
     extra_body = dict(kwargs.pop("extra_body", None) or {})
 
+    req_timeout = kwargs.pop("timeout", None)
+    if req_timeout is None and p == "nvidia":
+        req_timeout = 15.0
+
     create_kwargs: dict[str, Any] = {
         "model": tag,
         "messages": _normalize_openai_messages(messages),
         "temperature": float(temperature) if temperature is not None else 0.4,
     }
+    if req_timeout is not None:
+        create_kwargs["timeout"] = float(req_timeout)
     if max_output_tokens is not None and int(max_output_tokens) > 0:
         create_kwargs["max_tokens"] = int(max_output_tokens)
     if json_mode:
@@ -673,10 +683,10 @@ def _chat_openai_compat(
             )
         )
         alt = _fallback_model(tag)
-        if alt and not connectionish:
+        if alt:
             try:
                 logger.warning(
-                    "Local LLM %s failed (%s) — retrying fallback model %s",
+                    "Local/remote LLM %s failed (%s) — retrying fallback model %s",
                     tag,
                     exc,
                     alt,
@@ -1038,17 +1048,26 @@ def fast_chat(
             "I got an empty reply from the local model. "
             "Try again — thinking/reasoning mode may need to be disabled for this backend."
         )
-    result = chat(
-        model="auto",
-        messages=messages,
-        think=False,
-        max_output_tokens=max_output_tokens,
-        temperature=0.35,
-    )
-    reply = (result.get("message") or {}).get("content") or ""
-    reply = polish_reply(str(reply))
-    if reply:
-        return reply
+    try:
+        result = chat(
+            model="auto",
+            messages=messages,
+            think=False,
+            max_output_tokens=max_output_tokens,
+            temperature=0.35,
+        )
+        reply = (result.get("message") or {}).get("content") or ""
+        reply = polish_reply(str(reply))
+        if reply:
+            return reply
+    except Exception as exc:
+        logger.warning("fast_chat call failed: %s", exc)
+        if extra_context:
+            return extra_context.strip()
+        return (
+            f"Model backend error: {exc}. "
+            "Say what you'd like to do or check your provider settings."
+        )
     return (
         "I got an empty reply from the local model. "
         "Try again — thinking/reasoning mode may need to be disabled for this backend."
@@ -1056,7 +1075,7 @@ def fast_chat(
 
 
 def warm_llm() -> None:
-    """Background warmup so the first real reply is not cold-start slow."""
+    """Background warmup so the first real task is not a cold model start."""
     global _warmed
     if _warmed:
         return
@@ -1064,17 +1083,17 @@ def warm_llm() -> None:
     try:
         if _provider() in {"gemini", "google"} and _gemini_api_key():
             _gemini_client_cached()
-            chat(
-                model="auto",
-                messages=[
-                    {"role": "system", "content": "Reply with OK only."},
-                    {"role": "user", "content": "ping"},
-                ],
-                think=False,
-                max_output_tokens=4,
-                temperature=0.0,
-            )
-            logger.info("LLM warmed (%s)", active_backend())
+        chat(
+            model="auto",
+            messages=[
+                {"role": "system", "content": "Reply with OK only."},
+                {"role": "user", "content": "ping"},
+            ],
+            think=False,
+            max_output_tokens=4,
+            temperature=0.0,
+        )
+        logger.info("LLM warmed (%s)", active_backend())
     except Exception as exc:
         logger.debug("LLM warm skipped: %s", exc)
         _warmed = False

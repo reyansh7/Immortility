@@ -31,6 +31,8 @@ logs/
 .vector_db/
 vector_db/
 *.db
+*.db-wal
+*.db-shm
 !pytest.ini
 
 memory/data/
